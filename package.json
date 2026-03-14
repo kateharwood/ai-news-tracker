@@ -1,0 +1,33 @@
+{
+  "name": "ai-news-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "@supabase/ssr": "^0.5.2",
+    "@supabase/supabase-js": "^2.47.10",
+    "rss-parser": "^3.13.0",
+    "string-similarity": "^4.0.3",
+    "next": "14.2.18",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@types/string-similarity": "^4.0.0",
+    "eslint": "^8.57.0",
+    "eslint-config-next": "14.2.18",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.15",
+    "typescript": "^5.6.3"
+  }
+}

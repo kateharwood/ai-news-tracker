@@ -1,0 +1,10 @@
+The following text is a growing list of user preferences for an AI news curator. 
+Condense it into a shorter version (under 500 words) that preserves all the 
+important points: what the user wants more of and what they want less of. 
+Keep the same style (bullets or short phrases). Remove redundancy only.
+
+---
+{{prompt_content}}
+---
+
+Condensed version (under 500 words):

@@ -1,0 +1,6 @@
+Summarize this AI/tech news item in exactly one short sentence (under 25 words). Be neutral and informative.
+
+Title: {{title}}
+Content: {{raw_content}}
+
+One-sentence summary:

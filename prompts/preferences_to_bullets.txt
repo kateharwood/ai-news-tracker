@@ -1,0 +1,20 @@
+The user has upvoted or downvoted the following AI news items. 
+From these votes, extract brief bullet points describing what the user wants MORE of 
+and what they want LESS of in their AI news digest.
+
+Format your response as:
+
+MORE:
+- bullet one
+- bullet two
+
+LESS:
+- bullet one
+- bullet two
+
+Keep bullets short (one short phrase each). Be specific to the topics/themes evident from the items.
+
+Voted items (direction = up or down):
+{{voted_items}}
+
+Respond with only the MORE and LESS sections as above.
