@@ -12,6 +12,7 @@ interface Item {
     title: string;
     summary: string | null;
     url: string | null;
+    source_label: string | null;
   };
   vote: "up" | "down" | null;
   read: boolean;
@@ -115,11 +116,18 @@ export function RankingsList({ date }: { date: string }) {
                     {item.news_item.summary}
                   </p>
                 )}
-                {item.read && (
-                  <span className="inline-block mt-2 text-xs text-zinc-400">
-                    Read
-                  </span>
-                )}
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {item.news_item.source_label && (
+                    <span className="text-xs text-zinc-400">
+                      {item.news_item.source_label}
+                    </span>
+                  )}
+                  {item.read && (
+                    <span className="text-xs text-zinc-400">
+                      Read
+                    </span>
+                  )}
+                </div>
               </div>
               <div className="flex items-center gap-1 shrink-0">
                 <button

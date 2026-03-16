@@ -4,6 +4,30 @@ import { isDuplicate } from "./dedup";
 import type { Source } from "./types";
 
 const parser = new Parser();
+const REDDIT_USER_AGENT = "AI-News-Tracker/1.0";
+
+function isRedditFeedUrl(url: string): boolean {
+  try {
+    return new URL(url.trim()).hostname.toLowerCase().includes("reddit.com");
+  } catch {
+    return false;
+  }
+}
+
+/** Reddit serves RSS at path ending in .rss; normalize so we hit the feed. */
+function redditFeedUrl(url: string): string {
+  const trimmed = url.trim();
+  try {
+    const u = new URL(trimmed);
+    const path = u.pathname.replace(/\/+$/, "") || "/";
+    if (!path.toLowerCase().endsWith(".rss")) {
+      u.pathname = path + ".rss";
+    }
+    return u.toString();
+  } catch {
+    return trimmed;
+  }
+}
 
 const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
 const RSS_RETRY_ATTEMPTS = 3;
@@ -42,7 +66,25 @@ export async function fetchRssFeed(url: string): Promise<
   { title: string; content: string; link: string; guid: string }[]
 > {
   const trimmed = url.trim();
-  const feed = await fetchWithRetry(() => parser.parseURL(trimmed), "RSS");
+  const isReddit = isRedditFeedUrl(trimmed);
+  const feed = await fetchWithRetry(
+    async () => {
+      if (isReddit) {
+        const feedUrl = redditFeedUrl(trimmed);
+        const res = await fetch(feedUrl, {
+          headers: {
+            "User-Agent": REDDIT_USER_AGENT,
+            Accept: "application/rss+xml, application/xml, text/xml, */*",
+          },
+        });
+        if (!res.ok) throw new Error(`Status code ${res.status}`);
+        const xml = await res.text();
+        return parser.parseString(xml);
+      }
+      return parser.parseURL(trimmed);
+    },
+    "RSS"
+  );
   const cutoff = new Date(Date.now() - TWO_DAYS_MS);
   const all = feed.items || [];
   const recent = all.filter((item) => {
@@ -176,7 +218,13 @@ export async function ingestAll(): Promise<{ inserted: number }> {
         }
       }
     } catch (err) {
-      console.error("Ingest error for source", source.id, err);
+      const detail =
+        source.type === "rss" && config.url
+          ? ` feed: ${config.url.trim()}`
+          : source.type === "arxiv" && config.category
+            ? ` arxiv: ${config.category}`
+            : "";
+      console.error("Ingest error for source", source.id, detail, err);
     }
   }
   return { inserted };
