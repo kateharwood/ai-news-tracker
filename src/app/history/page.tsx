@@ -12,7 +12,7 @@ export default function HistoryPage() {
   const yesterday = new Date(Date.now() - 864e5).toLocaleDateString("en-CA");
 
   return (
-    <div className="max-w-3xl mx-auto px-4 py-8">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8">
       <h1 className="text-2xl font-semibold text-zinc-900 mb-6">History</h1>
       <div className="flex flex-wrap items-center gap-3 mb-8">
         <button

@@ -21,7 +21,7 @@ export async function GET(request: Request) {
       id, rank, date, news_item_id, is_surprise,
       news_items (
         id, title, summary, url, included_at,
-        raw_fetched_items ( source_id, sources ( type, config ) )
+        raw_fetched_items ( raw_content, source_id, sources ( type, config ) )
       )
     `
     )
@@ -43,7 +43,7 @@ export async function GET(request: Request) {
     .eq("user_id", user.id);
   const readSet = new Set((reads || []).map((r) => r.news_item_id));
   type SourceRow = { type: string; config: { url?: string; category?: string; keyword?: string } };
-  type RawRow = { source_id: string; sources: SourceRow | null };
+  type RawRow = { raw_content: string | null; source_id: string; sources: SourceRow | null };
   type NewsRow = {
     id: string;
     title: string;
@@ -75,11 +75,21 @@ export async function GET(request: Request) {
     }
     return null;
   }
+
+  function contentPreview(text: string | null | undefined, maxChars: number): string | null {
+    const cleaned = (text ?? "").replace(/\s+/g, " ").trim();
+    if (!cleaned) return null;
+    if (cleaned.length <= maxChars) return cleaned;
+    return cleaned.slice(0, maxChars).trimEnd() + "...";
+  }
+
   const items = (rankings || []).map((r) => {
     const row = r as unknown as Row;
     const news = Array.isArray(row.news_items) ? row.news_items[0] : row.news_items;
     const source = news?.raw_fetched_items?.sources ?? null;
     const label = sourceLabel(source);
+    // Top-story previews should feel like a real "lede", but remain bounded.
+    const preview = contentPreview(news?.raw_fetched_items?.raw_content ?? null, 2000);
     return {
       id: row.id,
       rank: row.rank,
@@ -94,6 +104,7 @@ export async function GET(request: Request) {
             url: news.url,
             included_at: news.included_at,
             source_label: label,
+            content_preview: preview ?? news.summary ?? null,
           }
         : null,
       vote: voteMap.get(row.news_item_id) ?? null,
