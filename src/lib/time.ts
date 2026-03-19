@@ -1,4 +1,16 @@
-const TZ = process.env.TZ || "America/New_York";
+const DEFAULT_TZ = "America/New_York";
+
+function resolveTimezone(): string {
+  const candidate = process.env.APP_TIMEZONE?.trim() || DEFAULT_TZ;
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone: candidate });
+    return candidate;
+  } catch {
+    return DEFAULT_TZ;
+  }
+}
+
+const TZ = resolveTimezone();
 
 export function todayEastern(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: TZ });
