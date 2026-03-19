@@ -49,11 +49,11 @@ export async function POST(request: Request) {
         .limit(VOTES_BATCH);
       if ((allVotes?.length ?? 0) >= VOTES_BATCH) {
         recentVotes = (allVotes || []).slice(0, VOTES_BATCH);
-        console.log("[run-preferences] First run: using 10 most recent votes");
+        console.log("[preferences] First run: using 10 most recent votes (no prior bullet run)");
       }
     }
     if (recentVotes.length < VOTES_BATCH) {
-      console.log("[run-preferences] Skipping: need", VOTES_BATCH, "votes since last run; have", recentVotes.length);
+      console.log("[preferences] Skipping: need", VOTES_BATCH, "votes since last run; have", recentVotes.length);
       return NextResponse.json({
         ok: true,
         ran: false,
@@ -78,20 +78,34 @@ export async function POST(request: Request) {
     };
   });
 
-  console.log("[run-preferences] Running: processing", recentVotes.length, "votes into preference bullets");
+  const upCount = recentVotes.filter((v) => v.direction === "up").length;
+  const downCount = recentVotes.length - upCount;
+  console.log("[preferences] === Pipeline start ===");
+  console.log("[preferences] Votes: processing batch of", recentVotes.length, "(", upCount, "up,", downCount, "down)");
+  console.log("[preferences] Step 1: Converting votes to preference bullets via LLM (input:", votedItems.length, "items)");
   const bullets = await preferencesToBullets(votedItems);
+  const bulletLines = bullets.split("\n").filter((l) => l.trim().length > 0);
+  console.log("[preferences] Step 1 done: bullets from LLM —", bullets.length, "chars,", bulletLines.length, "lines");
 
   const { data: promptRow } = await service
     .from("preference_prompt")
     .select("content, word_count")
     .eq("id", PREFERENCE_PROMPT_ID)
     .single();
+  const prevWordCount = wordCount(promptRow?.content ?? "");
+  console.log("[preferences] Current preference_prompt word count before append:", prevWordCount);
+
   let newContent = (promptRow?.content ?? "") + "\n\n" + bullets;
   let newWordCount = wordCount(newContent);
+  console.log("[preferences] After appending bullets: new word count =", newWordCount, "(condense threshold: 500)");
 
   if (newWordCount > 500) {
+    console.log("[preferences] Step 2: Word count", newWordCount, "exceeds 500. Calling LLM to condense prompt.");
     newContent = await condensePrompt(newContent);
     newWordCount = wordCount(newContent);
+    console.log("[preferences] Step 2 done: condense complete. New word count =", newWordCount);
+  } else {
+    console.log("[preferences] Step 2: Skipping condense (word count", newWordCount, "<= 500)");
   }
 
   await service
@@ -107,7 +121,8 @@ export async function POST(request: Request) {
     bullets_appended: bullets,
   });
 
-  console.log("[run-preferences] Done: appended bullets, word_count:", newWordCount);
+  console.log("[preferences] === Pipeline done ===");
+  console.log("[preferences] Saved preference_prompt (word_count:", newWordCount, "), inserted preference_bullet_runs (votes_processed:", recentVotes.length, ")");
   return NextResponse.json({
     ok: true,
     ran: true,

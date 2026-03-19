@@ -65,7 +65,7 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 ## Usage
 
 - **Dashboard**: Today’s top 10 (after cron has run). Upvote/downvote; click through to mark read; optionally hide read items.
-- **History**: View past days’ top 10 (date picker or “Yesterday”).
+- **History**: View past days’ rankings (date picker or “Yesterday”).
 - **Sources**: Add/edit/remove RSS feeds and arXiv sources (category + optional keyword).
 
 After 10 new votes, the app updates your preference prompt (and condenses it if it exceeds 500 words). Those preferences are used in the next day’s filter and rank.

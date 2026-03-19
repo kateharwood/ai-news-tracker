@@ -18,7 +18,7 @@ export async function GET(request: Request) {
     .from("daily_rankings")
     .select(
       `
-      id, rank, date, news_item_id,
+      id, rank, date, news_item_id, is_surprise,
       news_items (
         id, title, summary, url, included_at,
         raw_fetched_items ( source_id, sources ( type, config ) )
@@ -57,6 +57,7 @@ export async function GET(request: Request) {
     rank: number;
     date: string;
     news_item_id: string;
+    is_surprise: boolean;
     news_items: NewsRow | null;
   };
   function sourceLabel(source: SourceRow | null | undefined): string | null {
@@ -74,15 +75,17 @@ export async function GET(request: Request) {
     }
     return null;
   }
-  const items = (rankings || []).map((r: Row) => {
-    const news = r.news_items;
+  const items = (rankings || []).map((r) => {
+    const row = r as unknown as Row;
+    const news = Array.isArray(row.news_items) ? row.news_items[0] : row.news_items;
     const source = news?.raw_fetched_items?.sources ?? null;
     const label = sourceLabel(source);
     return {
-      id: r.id,
-      rank: r.rank,
-      date: r.date,
-      news_item_id: r.news_item_id,
+      id: row.id,
+      rank: row.rank,
+      date: row.date,
+      news_item_id: row.news_item_id,
+      is_surprise: row.is_surprise ?? false,
       news_item: news
         ? {
             id: news.id,
@@ -93,8 +96,8 @@ export async function GET(request: Request) {
             source_label: label,
           }
         : null,
-      vote: voteMap.get(r.news_item_id) ?? null,
-      read: readSet.has(r.news_item_id),
+      vote: voteMap.get(row.news_item_id) ?? null,
+      read: readSet.has(row.news_item_id),
     };
   });
   return NextResponse.json({ date, items });

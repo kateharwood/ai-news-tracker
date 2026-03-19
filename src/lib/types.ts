@@ -6,6 +6,8 @@ export interface Source {
   config: { url?: string; category?: string; keyword?: string };
   enabled: boolean;
   created_at: string;
+  /** Consecutive ingest runs that threw (reset on success). */
+  ingest_failure_streak?: number;
 }
 
 export interface RawFetchedItem {

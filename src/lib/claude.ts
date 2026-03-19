@@ -127,6 +127,7 @@ export async function rankTop10(
 export async function preferencesToBullets(
   votedItems: { title: string; summary: string | null; direction: string }[]
 ): Promise<string> {
+  console.log("[preferences/LLM] preferencesToBullets: input", votedItems.length, "voted items → calling Claude");
   const lines = votedItems.map(
     (v) => `- ${v.direction}: ${v.title}${v.summary ? ` | ${v.summary}` : ""}`
   );
@@ -140,10 +141,14 @@ export async function preferencesToBullets(
     messages: [{ role: "user", content: text }],
   });
   const content = res.content[0];
-  return content.type === "text" ? content.text.trim() : "";
+  const out = content.type === "text" ? content.text.trim() : "";
+  console.log("[preferences/LLM] preferencesToBullets: done → output", out.length, "chars");
+  return out;
 }
 
 export async function condensePrompt(promptContent: string): Promise<string> {
+  const inputWords = wordCount(promptContent);
+  console.log("[preferences/LLM] condensePrompt: input", inputWords, "words → calling Claude to condense");
   const template = loadPrompt("condense_prompt");
   const text = substitutePrompt(template, { prompt_content: promptContent });
   const res = await createWithFallback({
@@ -152,7 +157,10 @@ export async function condensePrompt(promptContent: string): Promise<string> {
     messages: [{ role: "user", content: text }],
   });
   const content = res.content[0];
-  return content.type === "text" ? content.text.trim() : "";
+  const out = content.type === "text" ? content.text.trim() : "";
+  const outputWords = wordCount(out);
+  console.log("[preferences/LLM] condensePrompt: done → output", outputWords, "words (was", inputWords, ")");
+  return out;
 }
 
 export function wordCount(s: string): number {

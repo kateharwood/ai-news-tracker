@@ -7,6 +7,7 @@ interface Item {
   rank: number;
   date: string;
   news_item_id: string;
+  is_surprise: boolean;
   news_item: {
     id: string;
     title: string;
@@ -117,6 +118,11 @@ export function RankingsList({ date }: { date: string }) {
                   </p>
                 )}
                 <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {item.is_surprise && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800">
+                      Surprise
+                    </span>
+                  )}
                   {item.news_item.source_label && (
                     <span className="text-xs text-zinc-400">
                       {item.news_item.source_label}

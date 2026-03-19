@@ -1,7 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ARXIV_CATEGORIES } from "@/lib/types";
+
+const INGEST_ERROR_STREAK_RED = 5;
 
 type SourceRow = {
   id: string;
@@ -9,14 +11,18 @@ type SourceRow = {
   config: { url?: string; category?: string; keyword?: string };
   enabled: boolean;
   created_at: string;
+  ingest_failure_streak?: number;
 };
 
 export function SourcesList({
   initialSources,
+  initialStaleSourceIds,
 }: {
   initialSources: SourceRow[];
+  initialStaleSourceIds: string[];
 }) {
   const [sources, setSources] = useState(initialSources);
+  const [staleIds, setStaleIds] = useState(() => new Set(initialStaleSourceIds));
   const [adding, setAdding] = useState(false);
   const [form, setForm] = useState({
     type: "rss" as "rss" | "arxiv",
@@ -49,8 +55,21 @@ export function SourcesList({
   async function deleteSource(id: string) {
     if (!confirm("Remove this source?")) return;
     const res = await fetch(`/api/sources?id=${id}`, { method: "DELETE" });
-    if (res.ok) setSources((prev) => prev.filter((s) => s.id !== id));
+    if (res.ok) {
+      setSources((prev) => prev.filter((s) => s.id !== id));
+      setStaleIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   }
+
+  // Keep the orange highlight state in sync with server recalculation
+  // (e.g. after manual "Fetch & rank news" where we call router.refresh()).
+  useEffect(() => {
+    setStaleIds(new Set(initialStaleSourceIds));
+  }, [initialStaleSourceIds]);
 
   return (
     <div className="space-y-6">
@@ -147,15 +166,28 @@ export function SourcesList({
               : s.type === "arxiv"
                 ? `${config.category ?? ""}${config.keyword ? ` + ${config.keyword}` : ""}`
                 : s.type;
+          const isStale = staleIds.has(s.id);
+          const streak = s.ingest_failure_streak ?? 0;
+          const isIngestError = streak >= INGEST_ERROR_STREAK_RED;
+          const rowClass = isIngestError
+            ? "bg-red-50/90 border-red-400 ring-1 ring-red-200/70"
+            : isStale
+              ? "bg-orange-50/80 border-orange-300 ring-1 ring-orange-200/60"
+              : "bg-white border-zinc-200";
           return (
             <li
               key={s.id}
-              className="bg-white border border-zinc-200 rounded-xl p-4 flex items-center justify-between gap-4 shadow-sm"
+              className={`rounded-xl p-4 flex items-center justify-between gap-4 shadow-sm border ${rowClass}`}
             >
               <div className="min-w-0 flex-1">
-                <div className="font-medium text-zinc-800 capitalize">
+                <div className="font-medium text-zinc-800 capitalize flex flex-wrap items-center gap-2">
                   {s.type === "rss" ? "RSS" : "arXiv"}
-                  <span className="text-zinc-600 font-normal ml-2">{label}</span>
+                  <span className="text-zinc-600 font-normal">{label}</span>
+                  {isIngestError && (
+                    <span className="text-xs font-medium text-red-800 bg-red-100 px-2 py-0.5 rounded">
+                      Ingest failed {streak}× in a row
+                    </span>
+                  )}
                 </div>
                 {s.type === "rss" && config.url && (
                   <p

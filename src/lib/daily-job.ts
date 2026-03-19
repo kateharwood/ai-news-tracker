@@ -11,6 +11,20 @@ import { isDuplicate } from "./dedup";
 
 const PREFERENCE_PROMPT_ID = "00000000-0000-0000-0000-000000000001";
 
+function sourceLabel(s: { type?: string; config?: { url?: string; category?: string; keyword?: string } } | null): string {
+  if (!s?.type) return "unknown";
+  const cfg = s.config ?? {};
+  if (s.type === "rss" && cfg.url) {
+    try {
+      return new URL(cfg.url.trim()).hostname;
+    } catch {
+      return cfg.url;
+    }
+  }
+  if (s.type === "arxiv") return [cfg.category, cfg.keyword].filter(Boolean).join(" + ") || "arxiv";
+  return s.type;
+}
+
 export async function runDailyJob(): Promise<{
   ingested: number;
   filtered: number;
@@ -26,10 +40,10 @@ export async function runDailyJob(): Promise<{
   } = { ingested: 0, filtered: 0, ranked: 0 };
 
   try {
-    console.log("[daily-job] Starting: ingest → filter → rank");
+    console.log("[daily-job] ========== Starting daily job: ingest → filter → rank ==========");
     const ingestResult = await ingestAll();
     result.ingested = ingestResult.inserted;
-    console.log("[daily-job] Ingest done: inserted", result.ingested, "new raw items");
+    console.log("[daily-job] Ingest phase complete: new raw_fetched_items inserted =", result.ingested);
 
     const { data: promptRow } = await supabase
       .from("preference_prompt")
@@ -40,7 +54,7 @@ export async function runDailyJob(): Promise<{
 
     const { data: rawItems } = await supabase
       .from("raw_fetched_items")
-      .select("id, title, raw_content, url")
+      .select("id, title, raw_content, url, source_id, sources(type, config)")
       .is("filtered_at", null)
       .order("fetched_at", { ascending: false });
     const { data: existingNewsRows } = await supabase
@@ -55,10 +69,16 @@ export async function runDailyJob(): Promise<{
       toProcess.push(raw);
       seenStories.push({ url: raw.url ?? null, title: raw.title });
     }
-    console.log("[daily-job] Filter: unfiltered", rawItems?.length ?? 0, "→ after URL/title dedupe", toProcess.length, "to process");
+    console.log("[daily-job] === Filter phase: LLM include/exclude for each raw item ===");
+    console.log("[daily-job] Filter input: raw items with filtered_at=null:", rawItems?.length ?? 0, "| after URL/title dedupe:", toProcess.length, "items to process");
 
-    for (const raw of toProcess) {
-      console.log("[daily-job] Filter item:", raw.title?.slice(0, 50) + (raw.title && raw.title.length > 50 ? "…" : ""));
+    const total = toProcess.length;
+    for (let i = 0; i < total; i++) {
+      const raw = toProcess[i];
+      const src = raw && "sources" in raw ? (Array.isArray((raw as { sources: unknown }).sources) ? (raw as { sources: unknown[] }).sources[0] : (raw as { sources: unknown }).sources) : null;
+      const label = sourceLabel(src as Parameters<typeof sourceLabel>[0]);
+      const titleSnip = raw.title?.slice(0, 50) + (raw.title && raw.title.length > 50 ? "…" : "");
+      console.log("[daily-job] Filter item", i + 1, "of", total, "| source:", label, "| title:", titleSnip);
       const decision = await filterItem(
         preferencePrompt,
         raw.title,
@@ -93,7 +113,7 @@ export async function runDailyJob(): Promise<{
         result.filtered++;
       }
     }
-    console.log("[daily-job] Filter done: included", result.filtered, "items");
+    console.log("[daily-job] Filter phase complete: items included (→ news_items) =", result.filtered);
 
     const start = last24hStart();
     const startIso = start.toISOString();
@@ -103,24 +123,46 @@ export async function runDailyJob(): Promise<{
       .gte("included_at", startIso)
       .order("included_at", { ascending: false });
     const items = recentNews || [];
-    console.log("[daily-job] Rank: candidates in last 24h:", items.length);
+    console.log("[daily-job] === Rank phase: pick top 10 (+ 1 surprise) from news in last 24h ===");
+    console.log("[daily-job] Rank input: candidates (news_items in last 24h) =", items.length);
     if (items.length > 0) {
       const ranking = await rankTop10(preferencePrompt, items);
+      const rankedIds = new Set(ranking.map((r) => r.news_item_id));
+      const surprisePool = items.filter((i) => !rankedIds.has(i.id));
+      const top9 = ranking.slice(0, 9);
+      const hasSurprise = surprisePool.length > 0;
+      const surpriseId = hasSurprise
+        ? surprisePool[Math.floor(Math.random() * surprisePool.length)].id
+        : null;
+      const final =
+        hasSurprise && surpriseId
+          ? [
+              ...top9.map((r, i) => ({ news_item_id: r.news_item_id, rank: i + 1, is_surprise: false })),
+              { news_item_id: surpriseId, rank: 10, is_surprise: true },
+            ]
+          : ranking.map((r) => ({ ...r, is_surprise: false }));
       const today = todayEastern();
       await supabase.from("daily_rankings").delete().eq("date", today);
-      for (const r of ranking) {
+      for (const r of final) {
         await supabase.from("daily_rankings").insert({
           news_item_id: r.news_item_id,
           rank: r.rank,
           date: today,
+          is_surprise: "is_surprise" in r ? r.is_surprise : false,
         });
         result.ranked++;
       }
-      console.log("[daily-job] Rank done: wrote", result.ranked, "to daily_rankings for", today);
+      console.log(
+        "[daily-job] Rank phase complete: wrote",
+        result.ranked,
+        "rows to daily_rankings for date",
+        today,
+        surprisePool.length > 0 ? "(includes 1 random surprise slot)" : ""
+      );
     } else {
-      console.log("[daily-job] Rank skipped: no items in last 24h");
+      console.log("[daily-job] Rank phase skipped: no news_items in last 24h");
     }
-    console.log("[daily-job] Done:", result);
+    console.log("[daily-job] ========== Daily job done:", result, "==========");
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
     console.error("[daily-job] Error:", result.error, err);

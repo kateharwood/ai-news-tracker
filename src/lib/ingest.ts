@@ -1,6 +1,5 @@
 import Parser from "rss-parser";
 import { createServiceRoleClient } from "@/lib/supabase/service";
-import { isDuplicate } from "./dedup";
 import type { Source } from "./types";
 
 const parser = new Parser();
@@ -45,7 +44,7 @@ async function fetchWithRetry<T>(fn: () => Promise<T>, context: string): Promise
       const isRetryable = is429 || msg.includes("503") || msg.includes("502");
       if (isRetryable && attempt < RSS_RETRY_ATTEMPTS) {
         const delay = RSS_RETRY_DELAY_MS * attempt;
-        console.warn("[ingest]", context, "attempt", attempt, "failed:", msg, "- retrying in", delay, "ms");
+        console.warn("[ingest] RSS fetch retry:", context, "— attempt", attempt, "of", RSS_RETRY_ATTEMPTS, "failed:", msg, "→ retrying in", delay, "ms");
         await new Promise((r) => setTimeout(r, delay));
       } else {
         throw err;
@@ -63,7 +62,13 @@ function itemDate(item: { pubDate?: string; isoDate?: string }): Date | null {
 }
 
 export async function fetchRssFeed(url: string): Promise<
-  { title: string; content: string; link: string; guid: string }[]
+  {
+    title: string;
+    content: string;
+    link: string;
+    guid: string;
+    published_at: string;
+  }[]
 > {
   const trimmed = url.trim();
   const isReddit = isRedditFeedUrl(trimmed);
@@ -87,39 +92,57 @@ export async function fetchRssFeed(url: string): Promise<
   );
   const cutoff = new Date(Date.now() - TWO_DAYS_MS);
   const all = feed.items || [];
-  const recent = all.filter((item) => {
-    const d = itemDate(item);
-    return d !== null && d >= cutoff;
-  });
-  if (all.length > recent.length) {
-    console.log("[ingest] RSS: kept", recent.length, "items from past 2 days, skipped", all.length - recent.length, "older");
-  }
-  return recent
+  const recent = all
     .map((item) => {
-      const description =
-        item.contentSnippet ||
-        (typeof item.summary === "string" ? item.summary : "") ||
-        "";
-      return {
-        title: item.title || "",
-        content: description,
-        link: item.link || item.guid || "",
-        guid: item.guid || item.link || item.title || Math.random().toString(),
-      };
-    });
+      const d = itemDate(item);
+      return d && d >= cutoff ? { item, d } : null;
+    })
+    .filter((x): x is { item: (typeof all)[number]; d: Date } => x !== null);
+
+  console.log(
+    "[ingest] RSS feed fetch success: URL=" +
+      trimmed +
+      " | items_in_feed=" +
+      all.length +
+      " | items_past_2_days=" +
+      recent.length +
+      (all.length > recent.length ? " (skipped " + (all.length - recent.length) + " older)" : "")
+  );
+
+  return recent.map(({ item, d }) => {
+    const description =
+      item.contentSnippet ||
+      (typeof item.summary === "string" ? item.summary : "") ||
+      "";
+    return {
+      title: item.title || "",
+      content: description,
+      link: item.link || item.guid || "",
+      guid: item.guid || item.link || item.title || Math.random().toString(),
+      published_at: d.toISOString(),
+    };
+  });
 }
 
 export async function fetchArxivFeed(
   category: string,
   keyword?: string
-): Promise<{ title: string; content: string; link: string; id: string }[]> {
+): Promise<
+  {
+    title: string;
+    content: string;
+    link: string;
+    id: string;
+    published_at: string | null;
+  }[]
+> {
   const query = keyword
     ? `all:${encodeURIComponent(keyword)}`
     : `cat:${category}`;
   const url = `http://export.arxiv.org/api/query?search_query=${query}&sortBy=submittedDate&sortOrder=descending&max_results=30`;
   const res = await fetch(url);
   const xml = await res.text();
-  const items: { title: string; content: string; link: string; id: string }[] = [];
+  const items: { title: string; content: string; link: string; id: string; published_at: string | null }[] = [];
   const idMatch = xml.matchAll(/<id>http:\/\/arxiv\.org\/abs\/([^<]+)<\/id>/g);
   const ids = Array.from(idMatch).map((m) => m[1]);
   const titleMatch = xml.matchAll(/<title>([\s\S]*?)<\/title>/g);
@@ -130,18 +153,71 @@ export async function fetchArxivFeed(
   const summaries = Array.from(summaryMatch).map((m) =>
     m[1].replace(/\s+/g, " ").trim().replace(/&quot;/g, '"')
   );
+  const publishedMatch = xml.matchAll(/<published>([\s\S]*?)<\/published>/g);
+  const publishedDates = Array.from(publishedMatch).map((m) =>
+    m[1].replace(/\s+/g, " ").trim()
+  );
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
     const title = titles[i] ?? "";
     const content = summaries[i] ?? "";
+    const publishedRaw = publishedDates[i] ?? "";
+    const published = publishedRaw ? new Date(publishedRaw) : null;
     items.push({
       title,
       content,
       link: `https://arxiv.org/abs/${id}`,
       id,
+      published_at:
+        published && !Number.isNaN(published.getTime()) ? published.toISOString() : null,
     });
   }
   return items;
+}
+
+const INGEST_FAILURE_THRESHOLD = 5;
+
+async function resetIngestFailureStreak(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  sourceId: string
+): Promise<void> {
+  const { error } = await supabase.from("sources").update({ ingest_failure_streak: 0 }).eq("id", sourceId);
+  if (error) {
+    console.warn("[ingest] Could not reset ingest_failure_streak (run migration 004?)", sourceId, error.message);
+  }
+}
+
+async function incrementIngestFailureStreak(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  sourceId: string
+): Promise<void> {
+  const { data: row, error: selErr } = await supabase
+    .from("sources")
+    .select("ingest_failure_streak")
+    .eq("id", sourceId)
+    .maybeSingle();
+  if (selErr) {
+    console.warn("[ingest] Could not read ingest_failure_streak (run migration 004?)", sourceId, selErr.message);
+    return;
+  }
+  const prev = typeof row?.ingest_failure_streak === "number" ? row.ingest_failure_streak : 0;
+  const next = prev + 1;
+  const { error: updErr } = await supabase.from("sources").update({ ingest_failure_streak: next }).eq("id", sourceId);
+  if (updErr) {
+    console.warn("[ingest] Could not increment ingest_failure_streak", sourceId, updErr.message);
+    return;
+  }
+  if (next >= INGEST_FAILURE_THRESHOLD) {
+    console.warn(
+      "[ingest] Source",
+      sourceId,
+      "ingest_failure_streak =",
+      next,
+      "(≥",
+      INGEST_FAILURE_THRESHOLD,
+      "consecutive failures — highlighted red on Sources page)"
+    );
+  }
 }
 
 export async function ingestAll(): Promise<{ inserted: number }> {
@@ -152,31 +228,31 @@ export async function ingestAll(): Promise<{ inserted: number }> {
     .eq("enabled", true);
   if (!sources?.length) return { inserted: 0 };
 
-  const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString();
-  const { data: existingRaw } = await supabase
-    .from("raw_fetched_items")
-    .select("url, title")
-    .gte("fetched_at", fiveDaysAgo);
-  const { data: existingNews } = await supabase
-    .from("news_items")
-    .select("url, title")
-    .gte("included_at", fiveDaysAgo);
-  const existing = [
-    ...(existingRaw || []),
-    ...(existingNews || []).map((n) => ({ url: n.url, title: n.title })),
-  ];
-  console.log("[ingest] Dedupe: checking against", existingRaw?.length ?? 0, "raw +", existingNews?.length ?? 0, "news items from past 5 days");
-
   let inserted = 0;
+  const sourceLabel = (s: Source) => {
+    const c = s.config as { url?: string; category?: string; keyword?: string };
+    if (s.type === "rss" && c.url) {
+      try {
+        return new URL(c.url.trim()).hostname;
+      } catch {
+        return c.url ?? "rss";
+      }
+    }
+    if (s.type === "arxiv" && c.category) return "arxiv " + (c.category ?? "") + (c.keyword ? " " + c.keyword : "");
+    return s.type;
+  };
+
   for (const source of sources as Source[]) {
     const config = source.config as { url?: string; category?: string; keyword?: string };
+    const label = sourceLabel(source);
     try {
+      const fetchedAt = new Date().toISOString();
       if (source.type === "rss" && config.url) {
         const feedUrl = config.url.trim();
-        console.log("[ingest] Starting RSS feed:", feedUrl);
+        console.log("[ingest] === RSS feed:", label, "| URL:", feedUrl, "===");
         const items = await fetchRssFeed(feedUrl);
+        let newFromFeed = 0;
         for (const item of items) {
-          if (isDuplicate(item.link, item.title, existing)) continue;
           const { error } = await supabase.from("raw_fetched_items").upsert(
             {
               source_id: source.id,
@@ -184,22 +260,26 @@ export async function ingestAll(): Promise<{ inserted: number }> {
               title: item.title,
               raw_content: item.content,
               url: item.link,
-              fetched_at: new Date().toISOString(),
+              published_at: item.published_at,
+              fetched_at: fetchedAt,
             },
             { onConflict: "source_id,external_id" }
           );
           if (!error) {
             inserted++;
-            existing.push({ url: item.link, title: item.title });
+            newFromFeed++;
           }
         }
+        console.log("[ingest] RSS feed result:", label, "| items_from_feed=" + items.length + " | new_saved=" + newFromFeed + " | total_new_so_far=" + inserted);
+        await resetIngestFailureStreak(supabase, source.id);
       } else if (source.type === "arxiv" && config.category) {
+        console.log("[ingest] === arXiv:", label, "| category:", config.category, config.keyword ? "| keyword: " + config.keyword : "", "===");
         const items = await fetchArxivFeed(
           config.category,
           config.keyword
         );
+        let newFromArxiv = 0;
         for (const item of items) {
-          if (isDuplicate(item.link, item.title, existing)) continue;
           const { error } = await supabase.from("raw_fetched_items").upsert(
             {
               source_id: source.id,
@@ -207,25 +287,24 @@ export async function ingestAll(): Promise<{ inserted: number }> {
               title: item.title,
               raw_content: item.content,
               url: item.link,
-              fetched_at: new Date().toISOString(),
+              published_at: item.published_at ?? fetchedAt,
+              fetched_at: fetchedAt,
             },
             { onConflict: "source_id,external_id" }
           );
           if (!error) {
             inserted++;
-            existing.push({ url: item.link, title: item.title });
+            newFromArxiv++;
           }
         }
+        console.log("[ingest] arXiv result:", label, "| items_from_api=" + items.length + " | new_saved=" + newFromArxiv + " | total_new_so_far=" + inserted);
+        await resetIngestFailureStreak(supabase, source.id);
       }
     } catch (err) {
-      const detail =
-        source.type === "rss" && config.url
-          ? ` feed: ${config.url.trim()}`
-          : source.type === "arxiv" && config.category
-            ? ` arxiv: ${config.category}`
-            : "";
-      console.error("Ingest error for source", source.id, detail, err);
+      console.error("[ingest] ERROR source", source.id, "(" + label + "):", err);
+      await incrementIngestFailureStreak(supabase, source.id);
     }
   }
+  console.log("[ingest] Ingest complete: total new raw_fetched_items inserted =", inserted);
   return { inserted };
 }
