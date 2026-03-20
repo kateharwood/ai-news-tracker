@@ -28,7 +28,7 @@ function redditFeedUrl(url: string): string {
   }
 }
 
-const TWO_DAYS_MS = 2 * 24 * 60 * 60 * 1000;
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 const RSS_RETRY_ATTEMPTS = 3;
 const RSS_RETRY_DELAY_MS = 2000;
 
@@ -90,7 +90,7 @@ export async function fetchRssFeed(url: string): Promise<
     },
     "RSS"
   );
-  const cutoff = new Date(Date.now() - TWO_DAYS_MS);
+  const cutoff = new Date(Date.now() - ONE_DAY_MS);
   const all = feed.items || [];
   const recent = all
     .map((item) => {
@@ -104,7 +104,7 @@ export async function fetchRssFeed(url: string): Promise<
       trimmed +
       " | items_in_feed=" +
       all.length +
-      " | items_past_2_days=" +
+      " | items_past_1_day=" +
       recent.length +
       (all.length > recent.length ? " (skipped " + (all.length - recent.length) + " older)" : "")
   );
