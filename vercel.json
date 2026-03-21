@@ -50,7 +50,7 @@
     },
     {
       "path": "/api/cron/email-digest",
-      "schedule": "0 13 * * *"
+      "schedule": "0 12 * * *"
     }
   ]
 }
