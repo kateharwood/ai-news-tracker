@@ -7,6 +7,7 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 - **Next.js** (App Router) on Vercel
 - **Supabase** (Postgres + Auth)
 - **Claude** (Anthropic API) for filter, rank, summarize, and preference bullets
+- **Resend** (optional) for a daily HTML email of today’s top 10
 
 ## Setup
 
@@ -26,7 +27,7 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 2. **Supabase**
 
    - Create a project at [supabase.com](https://supabase.com).
-   - Run the SQL in `supabase/migrations/001_initial.sql` in the SQL Editor (or use `supabase db push` if using Supabase CLI).
+   - Apply all migrations in `supabase/migrations/` in order (`001` … `008`), or run `supabase db push` if you use the Supabase CLI. The initial schema is in `001_initial.sql`; later files add columns and tables (e.g. `daily_rankings.is_surprise`, `email_digest_sent` for the email digest).
    - In Authentication → Providers, keep Email enabled. For **closed sign-up**, either:
      - Disable “Allow new signups” in Authentication → Providers → Email, and create your user via Supabase dashboard (Authentication → Users → Add user), or
      - Use an invite-only flow (e.g. only allow listed emails).
@@ -36,12 +37,20 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 
    Copy `env.example` to `.env.local` and set:
 
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - `SUPABASE_SERVICE_ROLE_KEY` (for cron and server-side writes)
-   - `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`
-   - `CRON_SECRET` (optional; set and pass as `Authorization: Bearer <CRON_SECRET>` when calling the daily cron)
-   - `TZ=America/New_York` (optional; for “today” and cron timing)
+   | Variable | Purpose |
+   |----------|---------|
+   | `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+   | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon (public) key |
+   | `SUPABASE_SERVICE_ROLE_KEY` | Service role key (cron and server-side writes) |
+   | `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` | Anthropic API |
+   | `CRON_SECRET` | Optional; if set, cron routes require `Authorization: Bearer <CRON_SECRET>` |
+   | `APP_TIMEZONE` | Optional; defaults to `America/New_York`. Used for “today” and ranking dates. On Vercel use this instead of `TZ`. |
+   | `RESEND_API_KEY` | For the daily email digest ([Resend](https://resend.com)) |
+   | `EMAIL_DIGEST_FROM` | Sender, e.g. `AI News <onboarding@resend.dev>` for testing |
+   | `EMAIL_DIGEST_TO` | Recipient inbox for the digest |
+   | `NEXT_PUBLIC_SITE_URL` | Optional; base URL for links inside the digest (defaults to `https://VERCEL_URL` on Vercel) |
+
+   Optional: `ANTHROPIC_MODEL` to override the default Claude model (see `env.example`).
 
 4. **Run locally**
 
@@ -51,24 +60,42 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 
    Open [http://localhost:3000](http://localhost:3000). Sign in with the user you created in Supabase.
 
-5. **Daily cron (ingest + filter + rank)**
+## Cron jobs (Vercel)
 
-   Call once per day (e.g. 6am ET via Vercel Cron or an external scheduler):
+`vercel.json` defines schedules in **UTC**:
 
-   ```bash
-   curl -X GET "https://your-app.vercel.app/api/cron/daily" \
-     -H "Authorization: Bearer YOUR_CRON_SECRET"
-   ```
+- **`/api/cron/daily`** — ingest, filter, and rank (runs every **two hours** on odd UTC hours: `1, 3, 5, …, 23`).
+- **`/api/cron/email-digest`** — sends one email per calendar day with today’s top 10 (newspaper-style HTML). Default: **`0 12 * * *`** (12:00 UTC daily, which is **7:00 AM Eastern** during EST or **8:00 AM Eastern** during EDT).
 
-   If `CRON_SECRET` is not set, the route still runs (useful for local testing).
+Secure cron routes in production by setting `CRON_SECRET` in the Vercel dashboard.
+
+### Manual triggers
+
+Daily pipeline:
+
+```bash
+curl -X GET "https://your-app.vercel.app/api/cron/daily" \
+  -H "Authorization: Bearer YOUR_CRON_SECRET"
+```
+
+Email digest (same auth pattern):
+
+```bash
+curl -X GET "https://your-app.vercel.app/api/cron/email-digest" \
+  -H "Authorization: Bearer YOUR_CRON_SECRET"
+```
+
+If `CRON_SECRET` is not set, the routes still run (useful for local testing only).
+
 
 ## Usage
 
-- **Dashboard**: Today’s top 10 (after cron has run). Upvote/downvote; click through to mark read; optionally hide read items.
-- **History**: View past days’ rankings (date picker or “Yesterday”).
+- **Dashboard**: Today’s top 10 in a newspaper-style layout (after the daily job has run). Upvote/downvote; open links to mark read.
+- **History**: Past days’ rankings (date picker or “Yesterday”).
 - **Sources**: Add/edit/remove RSS feeds and arXiv sources (category + optional keyword).
+- **Email**: Optional daily HTML digest mirroring the dashboard layout (configure Resend env vars and deploy).
 
-After 10 new votes, the app updates your preference prompt (and condenses it if it exceeds 500 words). Those preferences are used in the next day’s filter and rank.
+After 10 new votes, the app updates your preference prompt (and condenses it if it exceeds 500 words). Those preferences feed the next filter and rank runs.
 
 ## Prompts
 
