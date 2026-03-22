@@ -4,7 +4,6 @@ import {
   filterItem,
   summarizeItem,
   rankTop10,
-  wordCount,
 } from "./claude";
 import { ingestAll } from "./ingest";
 import { isDuplicate } from "./dedup";
@@ -25,32 +24,37 @@ function sourceLabel(s: { type?: string; config?: { url?: string; category?: str
   return s.type;
 }
 
-export async function runDailyJob(): Promise<{
+async function loadPreferencePrompt(supabase: ReturnType<typeof createServiceRoleClient>): Promise<string> {
+  const { data: promptRow } = await supabase
+    .from("preference_prompt")
+    .select("content")
+    .eq("id", PREFERENCE_PROMPT_ID)
+    .single();
+  return promptRow?.content ?? "";
+}
+
+/** Ingest feeds and run the LLM filter on unprocessed raw items (same as the frequent cron). */
+export async function runIngestFilterJob(): Promise<{
   ingested: number;
   filtered: number;
-  ranked: number;
+  ranked: 0;
   error?: string;
 }> {
   const supabase = createServiceRoleClient();
   const result: {
     ingested: number;
     filtered: number;
-    ranked: number;
+    ranked: 0;
     error?: string;
   } = { ingested: 0, filtered: 0, ranked: 0 };
 
   try {
-    console.log("[daily-job] ========== Starting daily job: ingest → filter → rank ==========");
+    console.log("[daily-job] ========== Ingest + filter job ==========");
     const ingestResult = await ingestAll();
     result.ingested = ingestResult.inserted;
     console.log("[daily-job] Ingest phase complete: new raw_fetched_items inserted =", result.ingested);
 
-    const { data: promptRow } = await supabase
-      .from("preference_prompt")
-      .select("content")
-      .eq("id", PREFERENCE_PROMPT_ID)
-      .single();
-    const preferencePrompt = promptRow?.content ?? "";
+    const preferencePrompt = await loadPreferencePrompt(supabase);
 
     const { data: rawItems } = await supabase
       .from("raw_fetched_items")
@@ -114,6 +118,32 @@ export async function runDailyJob(): Promise<{
       }
     }
     console.log("[daily-job] Filter phase complete: items included (→ news_items) =", result.filtered);
+    console.log("[daily-job] ========== Ingest + filter job done:", result, "==========");
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err);
+    console.error("[daily-job] Error:", result.error, err);
+  }
+  return result;
+}
+
+/** Rank top stories from candidates in the same window as before (`last24hStart` … now). Runs once per day on a schedule. */
+export async function runRankingJob(): Promise<{
+  ingested: 0;
+  filtered: 0;
+  ranked: number;
+  error?: string;
+}> {
+  const supabase = createServiceRoleClient();
+  const result: {
+    ingested: 0;
+    filtered: 0;
+    ranked: number;
+    error?: string;
+  } = { ingested: 0, filtered: 0, ranked: 0 };
+
+  try {
+    console.log("[daily-job] ========== Ranking job (last-window candidates → daily_rankings) ==========");
+    const preferencePrompt = await loadPreferencePrompt(supabase);
 
     const start = last24hStart();
     const startIso = start.toISOString();
@@ -162,10 +192,35 @@ export async function runDailyJob(): Promise<{
     } else {
       console.log("[daily-job] Rank phase skipped: no news_items in last 24h");
     }
-    console.log("[daily-job] ========== Daily job done:", result, "==========");
+    console.log("[daily-job] ========== Ranking job done:", result, "==========");
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
     console.error("[daily-job] Error:", result.error, err);
   }
   return result;
+}
+
+/** Full pipeline: ingest + filter, then rank. Used by the dashboard manual trigger. */
+export async function runDailyJob(): Promise<{
+  ingested: number;
+  filtered: number;
+  ranked: number;
+  error?: string;
+}> {
+  const first = await runIngestFilterJob();
+  if (first.error) {
+    return {
+      ingested: first.ingested,
+      filtered: first.filtered,
+      ranked: 0,
+      error: first.error,
+    };
+  }
+  const second = await runRankingJob();
+  return {
+    ingested: first.ingested,
+    filtered: first.filtered,
+    ranked: second.ranked,
+    error: second.error,
+  };
 }

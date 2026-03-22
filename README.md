@@ -64,19 +64,29 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 
 `vercel.json` defines schedules in **UTC**:
 
-- **`/api/cron/daily`** — ingest, filter, and rank (runs every **two hours** on odd UTC hours: `1, 3, 5, …, 23`).
+- **`/api/cron/daily`** — ingest and filter only (runs every **two hours** on odd UTC hours: `1, 3, 5, …, 23`). Same cadence as before; ranking is **not** part of this route.
+- **`/api/cron/rank-daily`** — builds today’s top 10 from **`news_items` included since `last24hStart()`** (same window the ranking step used before the split). Runs **once per day** at **`0 11 * * *`** (11:00 UTC), **before** the email digest so rankings exist when the digest sends.
 - **`/api/cron/email-digest`** — sends one email per calendar day with today’s top 10 (newspaper-style HTML). Default: **`0 12 * * *`** (12:00 UTC daily, which is **7:00 AM Eastern** during EST or **8:00 AM Eastern** during EDT).
 
 Secure cron routes in production by setting `CRON_SECRET` in the Vercel dashboard.
 
 ### Manual triggers
 
-Daily pipeline:
+Ingest + filter (same as the frequent cron):
 
 ```bash
 curl -X GET "https://your-app.vercel.app/api/cron/daily" \
   -H "Authorization: Bearer YOUR_CRON_SECRET"
 ```
+
+Ranking only (same logic as the daily rank cron):
+
+```bash
+curl -X GET "https://your-app.vercel.app/api/cron/rank-daily" \
+  -H "Authorization: Bearer YOUR_CRON_SECRET"
+```
+
+The dashboard **“Fetch & rank news”** button still runs the **full** pipeline (ingest → filter → rank) in one request.
 
 Email digest (same auth pattern):
 
