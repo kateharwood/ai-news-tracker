@@ -14,12 +14,16 @@ type SourceRow = {
   ingest_failure_streak?: number;
 };
 
+type SourceStats = { upvotes: number; downvotes: number; top10Appearances: number };
+
 export function SourcesList({
   initialSources,
   initialStaleSourceIds,
+  initialSourceStats,
 }: {
   initialSources: SourceRow[];
   initialStaleSourceIds: string[];
+  initialSourceStats: Record<string, SourceStats>;
 }) {
   const [sources, setSources] = useState(initialSources);
   const [staleIds, setStaleIds] = useState(() => new Set(initialStaleSourceIds));
@@ -70,6 +74,32 @@ export function SourcesList({
   useEffect(() => {
     setStaleIds(new Set(initialStaleSourceIds));
   }, [initialStaleSourceIds]);
+
+  function statsFor(sourceId: string): SourceStats {
+    return initialSourceStats[sourceId] ?? { upvotes: 0, downvotes: 0, top10Appearances: 0 };
+  }
+
+  const sortedSources = [...sources].sort((a, b) => {
+    const aStats = statsFor(a.id);
+    const bStats = statsFor(b.id);
+    const aVoteCount = aStats.upvotes + aStats.downvotes;
+    const bVoteCount = bStats.upvotes + bStats.downvotes;
+
+    if (aVoteCount === 0 && bVoteCount > 0) return 1;
+    if (aVoteCount > 0 && bVoteCount === 0) return -1;
+
+    if (aVoteCount > 0 && bVoteCount > 0) {
+      const aNet = aStats.upvotes - aStats.downvotes;
+      const bNet = bStats.upvotes - bStats.downvotes;
+      if (aNet !== bNet) return bNet - aNet;
+      if (aStats.upvotes !== bStats.upvotes) return bStats.upvotes - aStats.upvotes;
+      if (aStats.downvotes !== bStats.downvotes) return aStats.downvotes - bStats.downvotes;
+    } else if (aStats.top10Appearances !== bStats.top10Appearances) {
+      return bStats.top10Appearances - aStats.top10Appearances;
+    }
+
+    return a.created_at < b.created_at ? 1 : -1;
+  });
 
   return (
     <div className="space-y-6">
@@ -152,8 +182,9 @@ export function SourcesList({
         </div>
       )}
       <ul className="space-y-2">
-        {sources.map((s) => {
+        {sortedSources.map((s) => {
           const config = s.config as { url?: string; category?: string; keyword?: string };
+          const stats = statsFor(s.id);
           const label =
             s.type === "rss" && config.url
               ? (() => {
@@ -197,6 +228,10 @@ export function SourcesList({
                     {config.url}
                   </p>
                 )}
+                <p className="text-xs text-zinc-500 mt-1">
+                  Upvotes: {stats.upvotes} · Downvotes: {stats.downvotes} · Top 10 appearances:{" "}
+                  {stats.top10Appearances}
+                </p>
               </div>
               <button
                 type="button"
