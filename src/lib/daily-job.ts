@@ -25,11 +25,16 @@ function sourceLabel(s: { type?: string; config?: { url?: string; category?: str
 }
 
 function isArxivSource(news: {
-  raw_fetched_items?: { sources?: { type?: string } | { type?: string }[] | null } | null;
+  raw_fetched_items?:
+    | { sources?: { type?: string } | { type?: string }[] | null }
+    | { sources?: { type?: string } | { type?: string }[] | null }[]
+    | null;
 }): boolean {
   const raw = news.raw_fetched_items ?? null;
   if (!raw) return false;
-  const src = raw.sources ?? null;
+  const rawItem = Array.isArray(raw) ? raw[0] : raw;
+  if (!rawItem) return false;
+  const src = rawItem.sources ?? null;
   const source = Array.isArray(src) ? src[0] : src;
   return source?.type === "arxiv";
 }
