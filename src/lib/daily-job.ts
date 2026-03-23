@@ -24,6 +24,16 @@ function sourceLabel(s: { type?: string; config?: { url?: string; category?: str
   return s.type;
 }
 
+function isArxivSource(news: {
+  raw_fetched_items?: { sources?: { type?: string } | { type?: string }[] | null } | null;
+}): boolean {
+  const raw = news.raw_fetched_items ?? null;
+  if (!raw) return false;
+  const src = raw.sources ?? null;
+  const source = Array.isArray(src) ? src[0] : src;
+  return source?.type === "arxiv";
+}
+
 async function loadPreferencePrompt(supabase: ReturnType<typeof createServiceRoleClient>): Promise<string> {
   const { data: promptRow } = await supabase
     .from("preference_prompt")
@@ -149,7 +159,7 @@ export async function runRankingJob(): Promise<{
     const startIso = start.toISOString();
     const { data: recentNews } = await supabase
       .from("news_items")
-      .select("id, title, summary, url")
+      .select("id, title, summary, url, raw_fetched_items(sources(type))")
       .gte("included_at", startIso)
       .order("included_at", { ascending: false });
     const items = recentNews || [];
@@ -171,6 +181,30 @@ export async function runRankingJob(): Promise<{
               { news_item_id: surpriseId, rank: 10, is_surprise: true },
             ]
           : ranking.map((r) => ({ ...r, is_surprise: false }));
+
+      const isArxivById = new Map(items.map((i) => [i.id, isArxivSource(i)]));
+      let arxivCount = final.reduce(
+        (count, r) => count + (isArxivById.get(r.news_item_id) ? 1 : 0),
+        0
+      );
+      if (arxivCount > 2) {
+        const finalIds = new Set(final.map((r) => r.news_item_id));
+        const nonArxivReplacementIds = items
+          .map((i) => i.id)
+          .filter((id) => !finalIds.has(id) && !isArxivById.get(id));
+        for (let i = final.length - 1; i >= 0 && arxivCount > 2; i--) {
+          if (!isArxivById.get(final[i].news_item_id)) continue;
+          const replacementId = nonArxivReplacementIds.shift();
+          if (!replacementId) break;
+          final[i] = { ...final[i], news_item_id: replacementId, is_surprise: false };
+          arxivCount--;
+        }
+        console.log(
+          "[daily-job] Applied arXiv cap: final arXiv count =",
+          arxivCount,
+          "(max 2)"
+        );
+      }
       const today = todayEastern();
       await supabase.from("daily_rankings").delete().eq("date", today);
       for (const r of final) {
