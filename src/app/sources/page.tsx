@@ -196,9 +196,9 @@ export default async function SourcesPage() {
           </span>
         </span>
         <span className="block mt-3 text-zinc-600 max-w-xl">
-          "Filtered" here is one LLM include/exclude pass per raw item. Usage logs often show more
-          calls: optional summarize when an included item has no body text, plus a separate ranking
-          call when that job runs.
+          Here, <span className="font-medium text-zinc-700">filtered</span> means one LLM include/exclude
+          pass per raw item. Usage logs often show more calls: optional summarize when an included item
+          has no body text, plus a separate ranking call when that job runs.
         </span>
       </p>
       <SourcesList
