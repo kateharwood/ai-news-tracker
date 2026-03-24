@@ -1,6 +1,8 @@
 import { createServiceRoleClient } from "@/lib/supabase/service";
-import { last24hStart, todayEastern } from "./time";
+import { rolling24HoursAgo, todayEastern } from "./time";
 import {
+  buildFilterItemPrompt,
+  buildRankTop10Prompt,
   filterItem,
   summarizeItem,
   rankTop10,
@@ -92,12 +94,22 @@ export async function runIngestFilterJob(): Promise<{
     console.log("[daily-job] Filter input: raw items with filtered_at=null:", rawItems?.length ?? 0, "| after URL/title dedupe:", toProcess.length, "items to process");
 
     const total = toProcess.length;
+    let summarizeCalls = 0;
     for (let i = 0; i < total; i++) {
       const raw = toProcess[i];
       const src = raw && "sources" in raw ? (Array.isArray((raw as { sources: unknown }).sources) ? (raw as { sources: unknown[] }).sources[0] : (raw as { sources: unknown }).sources) : null;
       const label = sourceLabel(src as Parameters<typeof sourceLabel>[0]);
       const titleSnip = raw.title?.slice(0, 50) + (raw.title && raw.title.length > 50 ? "…" : "");
       console.log("[daily-job] Filter item", i + 1, "of", total, "| source:", label, "| title:", titleSnip);
+      if (i === 0) {
+        const fullPrompt = buildFilterItemPrompt(
+          preferencePrompt,
+          raw.title,
+          raw.raw_content ?? "",
+          raw.url ?? ""
+        );
+        console.log("[daily-job] Filter prompt (first item only, exact user message):\n" + fullPrompt);
+      }
       const decision = await filterItem(
         preferencePrompt,
         raw.title,
@@ -115,6 +127,7 @@ export async function runIngestFilterJob(): Promise<{
           ? raw.raw_content.slice(0, 200).trim()
           : null;
       if (!summary) {
+        summarizeCalls++;
         summary = await summarizeItem(raw.title, raw.raw_content ?? "");
       }
       const { data: inserted } = await supabase
@@ -133,6 +146,13 @@ export async function runIngestFilterJob(): Promise<{
       }
     }
     console.log("[daily-job] Filter phase complete: items included (→ news_items) =", result.filtered);
+    console.log(
+      "[daily-job] Claude calls this run (ingest+filter job): filterItem =",
+      total,
+      "| summarizeItem =",
+      summarizeCalls,
+      "(extra calls only for included items with no body text)"
+    );
     console.log("[daily-job] ========== Ingest + filter job done:", result, "==========");
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
@@ -141,7 +161,7 @@ export async function runIngestFilterJob(): Promise<{
   return result;
 }
 
-/** Rank top stories from candidates in the same window as before (`last24hStart` … now). Runs once per day on a schedule. */
+/** Rank top stories from candidates included in the rolling last 24 hours (`included_at`). Runs once per day on a schedule. */
 export async function runRankingJob(): Promise<{
   ingested: 0;
   filtered: 0;
@@ -157,10 +177,10 @@ export async function runRankingJob(): Promise<{
   } = { ingested: 0, filtered: 0, ranked: 0 };
 
   try {
-    console.log("[daily-job] ========== Ranking job (last-window candidates → daily_rankings) ==========");
+    console.log("[daily-job] ========== Ranking job (rolling 24h included → daily_rankings) ==========");
     const preferencePrompt = await loadPreferencePrompt(supabase);
 
-    const start = last24hStart();
+    const start = rolling24HoursAgo();
     const startIso = start.toISOString();
     const { data: recentNews } = await supabase
       .from("news_items")
@@ -168,9 +188,16 @@ export async function runRankingJob(): Promise<{
       .gte("included_at", startIso)
       .order("included_at", { ascending: false });
     const items = recentNews || [];
-    console.log("[daily-job] === Rank phase: pick top 10 (+ 1 surprise) from news in last 24h ===");
-    console.log("[daily-job] Rank input: candidates (news_items in last 24h) =", items.length);
+    console.log("[daily-job] === Rank phase: pick top 10 (+ 1 surprise) from news in rolling last 24h ===");
+    console.log(
+      "[daily-job] Rank window: included_at >=",
+      startIso,
+      "(now − 24h) | candidates (news_items) =",
+      items.length
+    );
     if (items.length > 0) {
+      const rankPrompt = buildRankTop10Prompt(preferencePrompt, items);
+      console.log("[daily-job] Rank prompt (exact user message):\n" + rankPrompt);
       const ranking = await rankTop10(preferencePrompt, items);
       const rankedIds = new Set(ranking.map((r) => r.news_item_id));
       const surprisePool = items.filter((i) => !rankedIds.has(i.id));

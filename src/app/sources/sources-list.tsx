@@ -14,16 +14,24 @@ type SourceRow = {
   ingest_failure_streak?: number;
 };
 
-type SourceStats = { upvotes: number; downvotes: number; top10Appearances: number };
+type SourceStats = {
+  upvotes: number;
+  downvotes: number;
+  top10Appearances: number;
+  filteredCountWindow: number;
+  avgFilteredPerDay: number;
+};
 
 export function SourcesList({
   initialSources,
   initialStaleSourceIds,
   initialSourceStats,
+  filterWindowDays,
 }: {
   initialSources: SourceRow[];
   initialStaleSourceIds: string[];
   initialSourceStats: Record<string, SourceStats>;
+  filterWindowDays: number;
 }) {
   const [sources, setSources] = useState(initialSources);
   const [staleIds, setStaleIds] = useState(() => new Set(initialStaleSourceIds));
@@ -76,28 +84,30 @@ export function SourcesList({
   }, [initialStaleSourceIds]);
 
   function statsFor(sourceId: string): SourceStats {
-    return initialSourceStats[sourceId] ?? { upvotes: 0, downvotes: 0, top10Appearances: 0 };
+    return (
+      initialSourceStats[sourceId] ?? {
+        upvotes: 0,
+        downvotes: 0,
+        top10Appearances: 0,
+        filteredCountWindow: 0,
+        avgFilteredPerDay: 0,
+      }
+    );
+  }
+
+  /** ((up − down) + top10) / filtered per day; no filter volume → sinks to bottom. */
+  function engagementPerFilteredDay(stats: SourceStats): number {
+    const denom = stats.avgFilteredPerDay;
+    if (denom <= 0) return Number.NEGATIVE_INFINITY;
+    return (stats.upvotes - stats.downvotes + stats.top10Appearances) / denom;
   }
 
   const sortedSources = [...sources].sort((a, b) => {
     const aStats = statsFor(a.id);
     const bStats = statsFor(b.id);
-    const aVoteCount = aStats.upvotes + aStats.downvotes;
-    const bVoteCount = bStats.upvotes + bStats.downvotes;
-
-    if (aVoteCount === 0 && bVoteCount > 0) return 1;
-    if (aVoteCount > 0 && bVoteCount === 0) return -1;
-
-    if (aVoteCount > 0 && bVoteCount > 0) {
-      const aNet = aStats.upvotes - aStats.downvotes;
-      const bNet = bStats.upvotes - bStats.downvotes;
-      if (aNet !== bNet) return bNet - aNet;
-      if (aStats.upvotes !== bStats.upvotes) return bStats.upvotes - aStats.upvotes;
-      if (aStats.downvotes !== bStats.downvotes) return aStats.downvotes - bStats.downvotes;
-    } else if (aStats.top10Appearances !== bStats.top10Appearances) {
-      return bStats.top10Appearances - aStats.top10Appearances;
-    }
-
+    const aScore = engagementPerFilteredDay(aStats);
+    const bScore = engagementPerFilteredDay(bStats);
+    if (aScore !== bScore) return bScore - aScore;
     return a.created_at < b.created_at ? 1 : -1;
   });
 
@@ -200,6 +210,7 @@ export function SourcesList({
           const isStale = staleIds.has(s.id);
           const streak = s.ingest_failure_streak ?? 0;
           const isIngestError = streak >= INGEST_ERROR_STREAK_RED;
+          const sortScore = engagementPerFilteredDay(stats);
           const rowClass = isIngestError
             ? "bg-red-50/90 border-red-400 ring-1 ring-red-200/70"
             : isStale
@@ -230,7 +241,12 @@ export function SourcesList({
                 )}
                 <p className="text-xs text-zinc-500 mt-1">
                   Upvotes: {stats.upvotes} · Downvotes: {stats.downvotes} · Top 10 appearances:{" "}
-                  {stats.top10Appearances}
+                  {stats.top10Appearances} · Filtered (last {filterWindowDays}d):{" "}
+                  {stats.filteredCountWindow} (~{stats.avgFilteredPerDay.toFixed(1)}/day)
+                </p>
+                <p className="text-xs text-zinc-500 mt-0.5">
+                  (up − down + top 10) ÷ filtered/day:{" "}
+                  {sortScore === Number.NEGATIVE_INFINITY ? "—" : sortScore.toFixed(2)}
                 </p>
               </div>
               <button

@@ -45,6 +45,10 @@ export function startOfTodayEastern(): Date {
   return d;
 }
 
+/**
+ * Start of the current calendar day in `APP_TIMEZONE` (not a rolling 24-hour window).
+ * Prefer {@link rolling24HoursAgo} when you need “everything in the last 24 hours.”
+ */
 export function last24hStart(): Date {
   const start = startOfTodayEastern();
   const now = nowEastern();
@@ -53,6 +57,11 @@ export function last24hStart(): Date {
     start.setDate(start.getDate() - 1);
   }
   return start;
+}
+
+/** Rolling 24 hours before now (wall-clock). Use for ranking / “included in the last 24h.” */
+export function rolling24HoursAgo(): Date {
+  return new Date(Date.now() - 24 * 60 * 60 * 1000);
 }
 
 export function toISOSimple(d: Date): string {

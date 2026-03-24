@@ -28,7 +28,9 @@ function redditFeedUrl(url: string): string {
   }
 }
 
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+/** Only keep ingested items whose published date is within this window (RSS + arXiv). */
+const INGEST_RECENT_HOURS = 3;
+const INGEST_RECENT_WINDOW_MS = INGEST_RECENT_HOURS * 60 * 60 * 1000;
 const RSS_RETRY_ATTEMPTS = 3;
 const RSS_RETRY_DELAY_MS = 2000;
 
@@ -90,7 +92,7 @@ export async function fetchRssFeed(url: string): Promise<
     },
     "RSS"
   );
-  const cutoff = new Date(Date.now() - ONE_DAY_MS);
+  const cutoff = new Date(Date.now() - INGEST_RECENT_WINDOW_MS);
   const all = feed.items || [];
   const recent = all
     .map((item) => {
@@ -104,9 +106,11 @@ export async function fetchRssFeed(url: string): Promise<
       trimmed +
       " | items_in_feed=" +
       all.length +
-      " | items_past_1_day=" +
+      " | items_past_" +
+      INGEST_RECENT_HOURS +
+      "h=" +
       recent.length +
-      (all.length > recent.length ? " (skipped " + (all.length - recent.length) + " older)" : "")
+      (all.length > recent.length ? " (skipped " + (all.length - recent.length) + " older or undated)" : "")
   );
 
   return recent.map(({ item, d }) => {
@@ -172,7 +176,27 @@ export async function fetchArxivFeed(
         published && !Number.isNaN(published.getTime()) ? published.toISOString() : null,
     });
   }
-  return items;
+
+  const cutoff = new Date(Date.now() - INGEST_RECENT_WINDOW_MS);
+  const recent = items.filter((it) => {
+    if (!it.published_at) return false;
+    const d = new Date(it.published_at);
+    return !Number.isNaN(d.getTime()) && d >= cutoff;
+  });
+
+  console.log(
+    "[ingest] arXiv API parse: query=" +
+      query +
+      " | items_from_api=" +
+      items.length +
+      " | items_past_" +
+      INGEST_RECENT_HOURS +
+      "h=" +
+      recent.length +
+      (items.length > recent.length ? " (skipped " + (items.length - recent.length) + " older or undated)" : "")
+  );
+
+  return recent;
 }
 
 const INGEST_FAILURE_THRESHOLD = 5;

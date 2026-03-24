@@ -56,19 +56,29 @@ async function createWithFallback(
   }
 }
 
+/** Exact user message sent to Claude for filter_item (same substitution as `filterItem`). */
+export function buildFilterItemPrompt(
+  preferencePrompt: string,
+  title: string,
+  rawContent: string,
+  url: string
+): string {
+  const template = loadPrompt("filter_item");
+  return substitutePrompt(template, {
+    preference_prompt: preferencePrompt,
+    title,
+    raw_content: rawContent.slice(0, 4000),
+    url: url || "",
+  });
+}
+
 export async function filterItem(
   preferencePrompt: string,
   title: string,
   rawContent: string,
   url: string
 ): Promise<"INCLUDED" | "EXCLUDED"> {
-  const template = loadPrompt("filter_item");
-  const text = substitutePrompt(template, {
-    preference_prompt: preferencePrompt,
-    title,
-    raw_content: rawContent.slice(0, 4000),
-    url: url || "",
-  });
+  const text = buildFilterItemPrompt(preferencePrompt, title, rawContent, url);
   const res = await createWithFallback({
     model: MODEL,
     max_tokens: MAX_TOKENS,
@@ -96,10 +106,11 @@ export async function summarizeItem(title: string, rawContent: string): Promise<
   return content.type === "text" ? content.text.trim() : "";
 }
 
-export async function rankTop10(
+/** Exact user message sent to Claude for rank_top10 (same substitution as `rankTop10`). */
+export function buildRankTop10Prompt(
   preferencePrompt: string,
   items: { id: string; title: string; summary: string | null; url: string | null }[]
-): Promise<{ news_item_id: string; rank: number }[]> {
+): string {
   const itemsBlock = items
     .map(
       (i) =>
@@ -107,10 +118,17 @@ export async function rankTop10(
     )
     .join("\n\n");
   const template = loadPrompt("rank_top10");
-  const text = substitutePrompt(template, {
+  return substitutePrompt(template, {
     preference_prompt: preferencePrompt,
     items: itemsBlock,
   });
+}
+
+export async function rankTop10(
+  preferencePrompt: string,
+  items: { id: string; title: string; summary: string | null; url: string | null }[]
+): Promise<{ news_item_id: string; rank: number }[]> {
+  const text = buildRankTop10Prompt(preferencePrompt, items);
   const res = await createWithFallback({
     model: MODEL,
     max_tokens: MAX_TOKENS,
