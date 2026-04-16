@@ -1,6 +1,6 @@
 # AI News Tracker
 
-Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, learn from your upvotes/downvotes.
+Personal AI news curator: ingest from RSS, filter and rank with Claude, learn from your upvotes/downvotes.
 
 ## Stack
 
@@ -27,7 +27,7 @@ Personal AI news curator: ingest from RSS/arXiv, filter and rank with Claude, le
 2. **Supabase**
 
    - Create a project at [supabase.com](https://supabase.com).
-   - Apply all migrations in `supabase/migrations/` in order (`001` … `009`), or run `supabase db push` if you use the Supabase CLI. The initial schema is in `001_initial.sql`; later files add columns and tables (e.g. `daily_rankings.is_surprise`, `email_digest_sent`, `raw_fetched_items.filter_skipped_at` for stale unfiltered rows).
+   - Apply all migrations in `supabase/migrations/` in order (`001` … `011`), or run `supabase db push` if you use the Supabase CLI. The initial schema is in `001_initial.sql`; later files add columns and tables (e.g. `daily_rankings.is_surprise`, `email_digest_sent`, `raw_fetched_items.filter_skipped_at`, migration `010` narrows `sources` to RSS-only, migration `011` adds view `source_filtered_counts` for exact per-source filter totals on the Sources page).
    - In Authentication → Providers, keep Email enabled. For **closed sign-up**, either:
      - Disable “Allow new signups” in Authentication → Providers → Email, and create your user via Supabase dashboard (Authentication → Users → Add user), or
      - Use an invite-only flow (e.g. only allow listed emails).
@@ -119,10 +119,8 @@ If `CRON_SECRET` is not set, the routes still run (useful for local testing only
 
 Used by: **dashboard full run** (first half) and **`/api/cron/daily`**. No LLMs until step 6.
 
-1. **Load sources** — Read all **enabled** rows from `sources` (RSS URLs and arXiv category/keyword configs).
-2. **Ingest per source** — For each source in turn:
-   - **RSS:** Fetch the feed (with retries on some transient errors). Keep only entries whose published time is within the **last 3 hours**; older or undated entries are skipped. Upsert each kept entry into `raw_fetched_items` on `(source_id, external_id)`. On success, reset that source’s ingest failure streak; on failure, increment the streak.
-   - **arXiv:** Query the arXiv API (`max_results=30`), parse results, keep only papers whose **published** time is within the **last 3 hours**, then upsert those into `raw_fetched_items` the same way.
+1. **Load sources** — Read all **enabled** rows from `sources` (each row is an **RSS** feed URL in `config.url`).
+2. **Ingest per source** — For each RSS source in turn: fetch the feed (with retries on some transient errors). Keep only entries whose published time is within the **last 3 hours**; older or undated entries are skipped. Upsert each kept entry into `raw_fetched_items` on `(source_id, external_id)`. On success, reset that source’s ingest failure streak; on failure, increment the streak.
 3. **Load preferences** — Read the single `preference_prompt` row (injected into filter prompts as `{{preference_prompt}}`).
 4. **Skip stale never-filtered rows (no LLM)** — Rows with `filtered_at` null, `filter_skipped_at` null, and **`fetched_at` older than 2 days** are bulk-updated: `filter_skipped_at` = now, `filter_skip_reason` = `stale_unfiltered`. They remain **without** `filtered_at` (never LLM-judged) and are excluded from the queue below. Response field **`skipped_stale`** is how many rows were marked this run.
 5. **Build the filter queue** — Select `raw_fetched_items` where **`filtered_at` and `filter_skipped_at` are both null** (newest `fetched_at` first). Load existing `news_items` (URL + title). Drop any raw row that **duplicates** an existing story: same normalized URL (scheme/host/path, no query/hash) **or** title similarity ≥ **0.85** compared to URLs/titles already seen (including both existing `news_items` and earlier rows in this queue).
@@ -142,11 +140,10 @@ Used by: **dashboard full run** (second half) and **`/api/cron/rank-daily`**.
 4. **LLM — `rankTop12` (Claude), once** — See **[rankTop12](#ranktop12)**. Parses up to **12** ranked `{ news_item_id, rank }` objects (sorted by `rank` in code).
 5. **Digest list (≤10, max 2 per source)** — Build an ordered list (target **10**, may be **fewer**):
    - **Base:** Ranks **1–9** from the model’s top 12 (deduped in order). **Rank 10:** one **surprise** story chosen uniformly at random from the 24h pool **not** among the model’s top **12** ids (`is_surprise: true`); if none exist, use the model’s **10th** id instead (no surprise flag).
-   - **Source cap:** `source_id` from `raw_fetched_items` defines the “source” (same RSS feed or arXiv config). While any source appears **more than twice**, remove the **lowest-ranked** (worst position) row among that source’s rows.
+   - **Source cap:** `source_id` from `raw_fetched_items` defines the “source” (same RSS feed). While any source appears **more than twice**, remove the **lowest-ranked** (worst position) row among that source’s rows.
    - **Backfill:** Append ids from the model’s ranks **10–12** (that are not already in the list), in model order, then any remaining 24h pool ids in DB order — only if adding respects **≤2 per source**. Stop at **10** rows or when no valid replacement remains.
-6. **arXiv cap** — If more than **two** rows are arXiv-backed, replace arXiv slots from the **bottom** with **non–arXiv** pool ids that are not already listed and that keep **≤2 per source**; stop when at most two arXiv remain or no valid replacement exists.
-7. **Persist today’s ranking** — **Today** = calendar date in **`APP_TIMEZONE`**. **Delete** all `daily_rankings` for that date, then **insert** one row per slot (`news_item_id`, `rank` 1…*n*, `date`, `is_surprise`) — *n* can be **fewer than 10** if steps 5–6 could not fill.
-8. **Return count** — `ranked` = number of rows inserted (0 if step 3 skipped).
+6. **Persist today’s ranking** — **Today** = calendar date in **`APP_TIMEZONE`**. **Delete** all `daily_rankings` for that date, then **insert** one row per slot (`news_item_id`, `rank` 1…*n*, `date`, `is_surprise`) — *n* can be **fewer than 10** if step 5 could not fill.
+7. **Return count** — `ranked` = number of rows inserted (0 if step 3 skipped).
 
 ---
 
@@ -244,7 +241,7 @@ You are a curator for a personal AI news digest. Given a list of included news i
 pick the TOP 12 that are most relevant and interesting to the user, and rank them with the best first
 (rank 1 = most important to show first).
 
-The app will later trim to at most 10 for the digest and enforce diversity (e.g. at most two items from the same RSS/arXiv source),
+The app will later trim to at most 10 for the digest and enforce diversity (e.g. at most two items from the same RSS feed),
 so include strong runners-up in ranks 11–12.
 
 User preferences:
@@ -335,7 +332,7 @@ Condensed version (under 500 words):
 
 - **Dashboard**: Today’s top 10 in a newspaper-style layout (after the daily job has run). Upvote/downvote; open links to mark read.
 - **History**: Past days’ rankings (date picker or “Yesterday”).
-- **Sources**: Add/edit/remove RSS feeds and arXiv sources (category + optional keyword).
+- **Sources**: Add/edit/remove RSS feeds.
 - **Email**: Optional daily HTML digest mirroring the dashboard layout (configure Resend env vars and deploy).
 
 After 10 new votes, the app updates your preference prompt (and condenses it if it exceeds 500 words). Those preferences feed the next filter and rank runs.

@@ -1,4 +1,4 @@
-export type SourceType = "rss" | "arxiv";
+export type SourceType = "rss";
 
 export interface Source {
   id: string;
@@ -62,11 +62,3 @@ export interface PreferencePrompt {
   updated_at: string;
 }
 
-export const ARXIV_CATEGORIES = [
-  "cs.AI",
-  "cs.LG",
-  "cs.CL",
-  "cs.CV",
-  "cs.NE",
-  "stat.ML",
-] as const;

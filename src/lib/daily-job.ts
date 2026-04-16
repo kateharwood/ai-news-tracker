@@ -154,23 +154,7 @@ function sourceLabel(s: { type?: string; config?: { url?: string; category?: str
       return cfg.url;
     }
   }
-  if (s.type === "arxiv") return [cfg.category, cfg.keyword].filter(Boolean).join(" + ") || "arxiv";
   return s.type;
-}
-
-function isArxivSource(news: {
-  raw_fetched_items?:
-    | { sources?: { type?: string } | { type?: string }[] | null }
-    | { sources?: { type?: string } | { type?: string }[] | null }[]
-    | null;
-}): boolean {
-  const raw = news.raw_fetched_items ?? null;
-  if (!raw) return false;
-  const rawItem = Array.isArray(raw) ? raw[0] : raw;
-  if (!rawItem) return false;
-  const src = rawItem.sources ?? null;
-  const source = Array.isArray(src) ? src[0] : src;
-  return source?.type === "arxiv";
 }
 
 async function loadPreferencePrompt(supabase: ReturnType<typeof createServiceRoleClient>): Promise<string> {
@@ -362,7 +346,7 @@ export async function runRankingJob(): Promise<{
       .order("included_at", { ascending: false });
     const items = (recentNews || []) as RankableNews[];
     console.log(
-      "[daily-job] === Rank phase: LLM ranks top 12 → trim to ≤10, max 2 per source (+ arXiv cap) ==="
+      "[daily-job] === Rank phase: LLM ranks top 12 → trim to ≤10, max 2 per source ==="
     );
     console.log(
       "[daily-job] Rank window: included_at >=",
@@ -374,47 +358,8 @@ export async function runRankingJob(): Promise<{
       const rankPrompt = buildRankTop12Prompt(preferencePrompt, items);
       console.log("[daily-job] Rank prompt (exact user message):\n" + rankPrompt);
       const ranking = await rankTop12(preferencePrompt, items);
-      let final = buildDiverseTopRanking(items, ranking);
+      const final = buildDiverseTopRanking(items, ranking);
 
-      const isArxivById = new Map(items.map((i) => [i.id, isArxivSource(i)]));
-      let arxivCount = final.reduce(
-        (count, r) => count + (isArxivById.get(r.news_item_id) ? 1 : 0),
-        0
-      );
-      if (arxivCount > 2) {
-        const finalIds = new Set(final.map((r) => r.news_item_id));
-        const nonArxivReplacementIds = items
-          .map((i) => i.id)
-          .filter((id) => !finalIds.has(id) && !isArxivById.get(id));
-        const sourceCountsExcluding = (excludeIndex: number) => {
-          const m = new Map<string, number>();
-          for (let j = 0; j < final.length; j++) {
-            if (j === excludeIndex) continue;
-            const k = sourceKeyForNewsId(items, final[j].news_item_id);
-            m.set(k, (m.get(k) ?? 0) + 1);
-          }
-          return m;
-        };
-        for (let i = final.length - 1; i >= 0 && arxivCount > 2; i--) {
-          if (!isArxivById.get(final[i].news_item_id)) continue;
-          const counts = sourceCountsExcluding(i);
-          const pickIdx = nonArxivReplacementIds.findIndex((id) => {
-            if (isArxivById.get(id)) return false;
-            const k = sourceKeyForNewsId(items, id);
-            return (counts.get(k) ?? 0) < MAX_PER_SOURCE;
-          });
-          if (pickIdx < 0) break;
-          const replacementId = nonArxivReplacementIds[pickIdx];
-          nonArxivReplacementIds.splice(pickIdx, 1);
-          final[i] = { ...final[i], news_item_id: replacementId, is_surprise: false };
-          arxivCount--;
-        }
-        console.log(
-          "[daily-job] Applied arXiv cap: final arXiv count =",
-          arxivCount,
-          "(max 2)"
-        );
-      }
       final.forEach((row, i) => {
         row.rank = i + 1;
       });

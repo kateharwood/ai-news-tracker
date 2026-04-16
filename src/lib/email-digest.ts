@@ -29,9 +29,6 @@ function sourceLabel(source: SourceRow | null | undefined): string | null {
       return cfg.url;
     }
   }
-  if (source.type === "arxiv") {
-    return [cfg.category, cfg.keyword].filter(Boolean).join(" + ") || null;
-  }
   return null;
 }
 

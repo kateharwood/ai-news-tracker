@@ -70,9 +70,6 @@ export async function GET(request: Request) {
         return cfg.url;
       }
     }
-    if (source.type === "arxiv") {
-      return [cfg.category, cfg.keyword].filter(Boolean).join(" + ") || null;
-    }
     return null;
   }
 
