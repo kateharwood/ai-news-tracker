@@ -6,18 +6,32 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const ORANGE_MONTHS = 3;
-/** Rolling window for filter stats; average is count ÷ this (not “calendar days since first use”). */
-const FILTER_STATS_DAYS = 4;
 const PAGE_SIZE = 1000;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+/** Floor for “days since added” so brand-new feeds do not get an infinite filters/day rate. */
+const MIN_SOURCE_AGE_DAYS = 1;
+
 type SourceStats = {
   upvotes: number;
   downvotes: number;
   top10Appearances: number;
-  /** Raw items that got `filtered_at` in the rolling window (one LLM filter each). */
-  filteredCountWindow: number;
-  /** `filteredCountWindow / filter window days` — recent daily rate, not diluted by older idle periods. */
+  /** Raw items that have ever been LLM-filtered (`filtered_at` set), per source. */
+  filteredCountAllTime: number;
+  /** `filteredCountAllTime` ÷ max(1 day, fractional days since `sources.created_at`). */
   avgFilteredPerDay: number;
 };
+
+function avgFilteredPerDaySinceCreated(
+  filteredCountAllTime: number,
+  sourceCreatedAtIso: string | undefined,
+  nowMs: number
+): number {
+  if (filteredCountAllTime <= 0) return 0;
+  const ageDays = sourceCreatedAtIso
+    ? Math.max((nowMs - new Date(sourceCreatedAtIso).getTime()) / MS_PER_DAY, MIN_SOURCE_AGE_DAYS)
+    : MIN_SOURCE_AGE_DAYS;
+  return filteredCountAllTime / ageDays;
+}
 
 async function fetchSourceIdsWithRecentPublished(
   supabase: ReturnType<typeof createServiceRoleClient>,
@@ -49,35 +63,24 @@ async function fetchSourceIdsWithRecentPublished(
   return result;
 }
 
-/** Count `raw_fetched_items` with `filtered_at` in range, grouped by `source_id` (paginated). */
-async function fetchFilteredCountsBySourceSince(
-  supabase: ReturnType<typeof createServiceRoleClient>,
-  sinceIso: string
+/**
+ * Exact all-time filtered counts per source (DB aggregate).
+ * Client-side pagination on `raw_fetched_items` was wrong: many rows share the same `filtered_at`
+ * (same cron run), so OFFSET/limit ordering is unstable and can undercount.
+ */
+async function fetchFilteredCountsBySourceAllTime(
+  supabase: ReturnType<typeof createServiceRoleClient>
 ): Promise<Map<string, number>> {
   const counts = new Map<string, number>();
-
-  for (let offset = 0; ; offset += PAGE_SIZE) {
-    const { data: batch, error } = await supabase
-      .from("raw_fetched_items")
-      .select("source_id")
-      .gte("filtered_at", sinceIso)
-      .order("filtered_at", { ascending: true })
-      .range(offset, offset + PAGE_SIZE - 1);
-
-    if (error) {
-      console.warn("[sources] filtered-at stats query failed:", error.message);
-      break;
-    }
-
-    if (!batch?.length) break;
-
-    for (const row of batch) {
-      if (!row.source_id) continue;
-      counts.set(row.source_id, (counts.get(row.source_id) ?? 0) + 1);
-    }
-    if (batch.length < PAGE_SIZE) break;
+  const { data, error } = await supabase.from("source_filtered_counts").select("source_id, filtered_count");
+  if (error) {
+    console.warn("[sources] source_filtered_counts query failed:", error.message);
+    return counts;
   }
-
+  for (const row of data ?? []) {
+    if (row.source_id == null) continue;
+    counts.set(row.source_id, Number(row.filtered_count) || 0);
+  }
   return counts;
 }
 
@@ -108,12 +111,8 @@ export default async function SourcesPage() {
     .map((s) => s.id)
     .filter((id) => !sourcesWithRecentPublished.has(id));
 
-  const filterStatsSince = new Date();
-  filterStatsSince.setDate(filterStatsSince.getDate() - FILTER_STATS_DAYS);
-  const filteredCountsBySource = await fetchFilteredCountsBySourceSince(
-    supabase,
-    filterStatsSince.toISOString()
-  );
+  const filteredCountsBySource = await fetchFilteredCountsBySourceAllTime(supabase);
+  const nowMs = Date.now();
 
   const sourceStats: Record<string, SourceStats> = {};
   for (const s of sources ?? []) {
@@ -122,10 +121,12 @@ export default async function SourcesPage() {
       upvotes: 0,
       downvotes: 0,
       top10Appearances: 0,
-      filteredCountWindow: n,
-      avgFilteredPerDay: n / FILTER_STATS_DAYS,
+      filteredCountAllTime: n,
+      avgFilteredPerDay: avgFilteredPerDaySinceCreated(n, s.created_at, nowMs),
     };
   }
+
+  const createdAtBySourceId = new Map((sources ?? []).map((s) => [s.id, s.created_at]));
 
   if (user?.id) {
     const { data: voteRows, error: votesError } = await supabase
@@ -142,12 +143,17 @@ export default async function SourcesPage() {
         const sourceId = rawItem?.source_id ?? null;
         if (!sourceId) continue;
         if (!sourceStats[sourceId]) {
+          const n = filteredCountsBySource.get(sourceId) ?? 0;
           sourceStats[sourceId] = {
             upvotes: 0,
             downvotes: 0,
             top10Appearances: 0,
-            filteredCountWindow: 0,
-            avgFilteredPerDay: 0,
+            filteredCountAllTime: n,
+            avgFilteredPerDay: avgFilteredPerDaySinceCreated(
+              n,
+              createdAtBySourceId.get(sourceId),
+              nowMs
+            ),
           };
         }
         if (row.direction === "up") sourceStats[sourceId].upvotes += 1;
@@ -169,12 +175,17 @@ export default async function SourcesPage() {
       const sourceId = rawItem?.source_id ?? null;
       if (!sourceId) continue;
       if (!sourceStats[sourceId]) {
+        const n = filteredCountsBySource.get(sourceId) ?? 0;
         sourceStats[sourceId] = {
           upvotes: 0,
           downvotes: 0,
           top10Appearances: 0,
-          filteredCountWindow: 0,
-          avgFilteredPerDay: 0,
+          filteredCountAllTime: n,
+          avgFilteredPerDay: avgFilteredPerDaySinceCreated(
+            n,
+            createdAtBySourceId.get(sourceId),
+            nowMs
+          ),
         };
       }
       sourceStats[sourceId].top10Appearances += 1;
@@ -205,7 +216,6 @@ export default async function SourcesPage() {
         initialSources={sources ?? []}
         initialStaleSourceIds={staleSourceIds}
         initialSourceStats={sourceStats}
-        filterWindowDays={FILTER_STATS_DAYS}
       />
     </div>
   );

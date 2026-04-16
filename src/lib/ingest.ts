@@ -28,7 +28,7 @@ function redditFeedUrl(url: string): string {
   }
 }
 
-/** Only keep ingested items whose published date is within this window (RSS + arXiv). */
+/** Only keep ingested items whose published date is within this window (RSS). */
 const INGEST_RECENT_HOURS = 3;
 const INGEST_RECENT_WINDOW_MS = INGEST_RECENT_HOURS * 60 * 60 * 1000;
 const RSS_RETRY_ATTEMPTS = 3;
@@ -128,77 +128,6 @@ export async function fetchRssFeed(url: string): Promise<
   });
 }
 
-export async function fetchArxivFeed(
-  category: string,
-  keyword?: string
-): Promise<
-  {
-    title: string;
-    content: string;
-    link: string;
-    id: string;
-    published_at: string | null;
-  }[]
-> {
-  const query = keyword
-    ? `all:${encodeURIComponent(keyword)}`
-    : `cat:${category}`;
-  const url = `http://export.arxiv.org/api/query?search_query=${query}&sortBy=submittedDate&sortOrder=descending&max_results=30`;
-  const res = await fetch(url);
-  const xml = await res.text();
-  const items: { title: string; content: string; link: string; id: string; published_at: string | null }[] = [];
-  const idMatch = xml.matchAll(/<id>http:\/\/arxiv\.org\/abs\/([^<]+)<\/id>/g);
-  const ids = Array.from(idMatch).map((m) => m[1]);
-  const titleMatch = xml.matchAll(/<title>([\s\S]*?)<\/title>/g);
-  const titles = Array.from(titleMatch)
-    .filter((_, i) => i > 0)
-    .map((m) => m[1].replace(/\s+/g, " ").trim());
-  const summaryMatch = xml.matchAll(/<summary>([\s\S]*?)<\/summary>/g);
-  const summaries = Array.from(summaryMatch).map((m) =>
-    m[1].replace(/\s+/g, " ").trim().replace(/&quot;/g, '"')
-  );
-  const publishedMatch = xml.matchAll(/<published>([\s\S]*?)<\/published>/g);
-  const publishedDates = Array.from(publishedMatch).map((m) =>
-    m[1].replace(/\s+/g, " ").trim()
-  );
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i];
-    const title = titles[i] ?? "";
-    const content = summaries[i] ?? "";
-    const publishedRaw = publishedDates[i] ?? "";
-    const published = publishedRaw ? new Date(publishedRaw) : null;
-    items.push({
-      title,
-      content,
-      link: `https://arxiv.org/abs/${id}`,
-      id,
-      published_at:
-        published && !Number.isNaN(published.getTime()) ? published.toISOString() : null,
-    });
-  }
-
-  const cutoff = new Date(Date.now() - INGEST_RECENT_WINDOW_MS);
-  const recent = items.filter((it) => {
-    if (!it.published_at) return false;
-    const d = new Date(it.published_at);
-    return !Number.isNaN(d.getTime()) && d >= cutoff;
-  });
-
-  console.log(
-    "[ingest] arXiv API parse: query=" +
-      query +
-      " | items_from_api=" +
-      items.length +
-      " | items_past_" +
-      INGEST_RECENT_HOURS +
-      "h=" +
-      recent.length +
-      (items.length > recent.length ? " (skipped " + (items.length - recent.length) + " older or undated)" : "")
-  );
-
-  return recent;
-}
-
 const INGEST_FAILURE_THRESHOLD = 5;
 
 async function resetIngestFailureStreak(
@@ -262,7 +191,6 @@ export async function ingestAll(): Promise<{ inserted: number }> {
         return c.url ?? "rss";
       }
     }
-    if (s.type === "arxiv" && c.category) return "arxiv " + (c.category ?? "") + (c.keyword ? " " + c.keyword : "");
     return s.type;
   };
 
@@ -295,33 +223,6 @@ export async function ingestAll(): Promise<{ inserted: number }> {
           }
         }
         console.log("[ingest] RSS feed result:", label, "| items_from_feed=" + items.length + " | new_saved=" + newFromFeed + " | total_new_so_far=" + inserted);
-        await resetIngestFailureStreak(supabase, source.id);
-      } else if (source.type === "arxiv" && config.category) {
-        console.log("[ingest] === arXiv:", label, "| category:", config.category, config.keyword ? "| keyword: " + config.keyword : "", "===");
-        const items = await fetchArxivFeed(
-          config.category,
-          config.keyword
-        );
-        let newFromArxiv = 0;
-        for (const item of items) {
-          const { error } = await supabase.from("raw_fetched_items").upsert(
-            {
-              source_id: source.id,
-              external_id: item.id,
-              title: item.title,
-              raw_content: item.content,
-              url: item.link,
-              published_at: item.published_at ?? fetchedAt,
-              fetched_at: fetchedAt,
-            },
-            { onConflict: "source_id,external_id" }
-          );
-          if (!error) {
-            inserted++;
-            newFromArxiv++;
-          }
-        }
-        console.log("[ingest] arXiv result:", label, "| items_from_api=" + items.length + " | new_saved=" + newFromArxiv + " | total_new_so_far=" + inserted);
         await resetIngestFailureStreak(supabase, source.id);
       }
     } catch (err) {

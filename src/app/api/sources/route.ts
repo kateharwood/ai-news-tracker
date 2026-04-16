@@ -29,12 +29,13 @@ export async function POST(request: Request) {
   }
   const body = await request.json();
   const { type, config } = body;
-  if (!type || !config || !["rss", "arxiv"].includes(type)) {
-    return NextResponse.json({ error: "Bad request" }, { status: 400 });
+  const url = typeof (config as { url?: string }).url === "string" ? (config as { url: string }).url.trim() : "";
+  if (type !== "rss" || !config || !url) {
+    return NextResponse.json({ error: "Bad request: RSS sources require type rss and a non-empty config.url" }, { status: 400 });
   }
   const { data, error } = await supabase
     .from("sources")
-    .insert({ type, config, enabled: true })
+    .insert({ type: "rss", config: { url }, enabled: true })
     .select()
     .single();
   if (error) {

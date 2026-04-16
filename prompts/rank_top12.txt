@@ -1,6 +1,9 @@
 You are a curator for a personal AI news digest. Given a list of included news items and the user's preferences,
-pick the TOP 10 that are most relevant and interesting to the user, and rank them with the best first
+pick the TOP 12 that are most relevant and interesting to the user, and rank them with the best first
 (rank 1 = most important to show first).
+
+The app will later trim to at most 10 for the digest and enforce diversity (e.g. at most two items from the same RSS feed),
+so include strong runners-up in ranks 11–12.
 
 User preferences:
 ---
@@ -10,7 +13,7 @@ User preferences:
 Items (each has id, title, summary, url):
 {{items}}
 
-Respond with a JSON array of exactly 10 objects, each with "news_item_id" (uuid string) and "rank" (1-10).
+Respond with a JSON array of exactly 12 objects, each with "news_item_id" (uuid string) and "rank" (1-12).
 Example:
 [{"news_item_id": "uuid-1", "rank": 1}, {"news_item_id": "uuid-2", "rank": 2}, ...]
 

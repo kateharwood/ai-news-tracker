@@ -2,15 +2,147 @@ import { createServiceRoleClient } from "@/lib/supabase/service";
 import { rolling24HoursAgo, todayEastern } from "./time";
 import {
   buildFilterItemPrompt,
-  buildRankTop10Prompt,
+  buildRankTop12Prompt,
   filterItem,
   summarizeItem,
-  rankTop10,
+  rankTop12,
 } from "./claude";
 import { ingestAll } from "./ingest";
 import { isDuplicate } from "./dedup";
 
 const PREFERENCE_PROMPT_ID = "00000000-0000-0000-0000-000000000001";
+
+/** Raw rows older than this (by `fetched_at`) with `filtered_at` still null are marked skipped, not LLM-filtered. */
+const STALE_UNFILTERED_RAW_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+
+const MAX_DIGEST_SLOTS = 10;
+const MAX_PER_SOURCE = 2;
+const LLM_RANK_DEPTH = 12;
+
+type RankableNews = {
+  id: string;
+  title: string;
+  summary: string | null;
+  url: string | null;
+  raw_fetched_items:
+    | { source_id?: string; sources?: { type?: string } | { type?: string }[] | null }
+    | { source_id?: string; sources?: { type?: string } | { type?: string }[] | null }[]
+    | null;
+};
+
+type FinalRankRow = { news_item_id: string; rank: number; is_surprise: boolean };
+
+function newsSourceKey(item: RankableNews): string {
+  const raw = item.raw_fetched_items ?? null;
+  const row = Array.isArray(raw) ? raw[0] : raw;
+  const sid = row && typeof row === "object" && "source_id" in row ? row.source_id : null;
+  if (typeof sid === "string" && sid.length > 0) return `source:${sid}`;
+  return `item:${item.id}`;
+}
+
+function sourceKeyForNewsId(items: RankableNews[], id: string): string {
+  const it = items.find((i) => i.id === id);
+  return it ? newsSourceKey(it) : `item:${id}`;
+}
+
+function uniqueIdsInRankOrder(ranking: { news_item_id: string; rank: number }[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of ranking) {
+    if (seen.has(r.news_item_id)) continue;
+    seen.add(r.news_item_id);
+    out.push(r.news_item_id);
+  }
+  return out;
+}
+
+function countBySourceKey(rows: FinalRankRow[], sourceKey: (id: string) => string): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const row of rows) {
+    const k = sourceKey(row.news_item_id);
+    m.set(k, (m.get(k) ?? 0) + 1);
+  }
+  return m;
+}
+
+/** Build up to MAX_DIGEST_SLOTS rows: start from LLM top 9 + surprise (or 10th from model), enforce ≤2 per source, backfill from ranks 10–12 then pool; may return fewer than MAX_DIGEST_SLOTS. */
+function buildDiverseTopRanking(
+  items: RankableNews[],
+  ranking: { news_item_id: string; rank: number }[]
+): FinalRankRow[] {
+  const idToItem = new Map(items.map((i) => [i.id, i]));
+  const sourceKeyById = (id: string) => {
+    const it = idToItem.get(id);
+    return it ? newsSourceKey(it) : `item:${id}`;
+  };
+
+  const modelOrder = uniqueIdsInRankOrder(ranking).slice(0, LLM_RANK_DEPTH);
+  const modelSet = new Set(modelOrder);
+  const top9 = modelOrder.slice(0, 9);
+  const outsideModel = items.filter((i) => !modelSet.has(i.id));
+  const surpriseId =
+    outsideModel.length > 0
+      ? outsideModel[Math.floor(Math.random() * outsideModel.length)].id
+      : modelOrder[9] ?? null;
+
+  let rows: FinalRankRow[] = top9.map((news_item_id, i) => ({
+    news_item_id,
+    rank: i + 1,
+    is_surprise: false,
+  }));
+  if (surpriseId !== null && !rows.some((r) => r.news_item_id === surpriseId)) {
+    rows.push({
+      news_item_id: surpriseId,
+      rank: 10,
+      is_surprise: outsideModel.length > 0,
+    });
+  } else if (rows.length === 9 && modelOrder[9] && !rows.some((r) => r.news_item_id === modelOrder[9])) {
+    rows.push({ news_item_id: modelOrder[9], rank: 10, is_surprise: false });
+  }
+
+  const renumber = (r: FinalRankRow[]) => r.forEach((row, i) => (row.rank = i + 1));
+
+  const removeOverQuota = (): boolean => {
+    const counts = countBySourceKey(rows, (id) => sourceKeyById(id));
+    const overKey = Array.from(counts.entries()).find(([, n]) => n > MAX_PER_SOURCE)?.[0];
+    if (!overKey) return false;
+    const candidates = rows.filter((row) => sourceKeyById(row.news_item_id) === overKey);
+    const victim = candidates.reduce((a, b) => (a.rank > b.rank ? a : b));
+    rows = rows.filter((row) => row.news_item_id !== victim.news_item_id);
+    renumber(rows);
+    return true;
+  };
+
+  while (removeOverQuota()) {
+    /* drain */
+  }
+
+  const used = new Set(rows.map((r) => r.news_item_id));
+  const replacementQueue: string[] = [];
+  for (const id of modelOrder) {
+    if (!used.has(id)) replacementQueue.push(id);
+  }
+  for (const it of items) {
+    if (!used.has(it.id) && !replacementQueue.includes(it.id)) replacementQueue.push(it.id);
+  }
+
+  const canAdd = (id: string): boolean => {
+    const k = sourceKeyById(id);
+    const c = countBySourceKey(rows, (nid) => sourceKeyById(nid)).get(k) ?? 0;
+    return c < MAX_PER_SOURCE;
+  };
+
+  while (rows.length < MAX_DIGEST_SLOTS && replacementQueue.length > 0) {
+    const id = replacementQueue.shift()!;
+    if (used.has(id) || !canAdd(id)) continue;
+    rows.push({ news_item_id: id, rank: rows.length + 1, is_surprise: false });
+    used.add(id);
+    renumber(rows);
+  }
+
+  renumber(rows);
+  return rows;
+}
 
 function sourceLabel(s: { type?: string; config?: { url?: string; category?: string; keyword?: string } } | null): string {
   if (!s?.type) return "unknown";
@@ -22,23 +154,7 @@ function sourceLabel(s: { type?: string; config?: { url?: string; category?: str
       return cfg.url;
     }
   }
-  if (s.type === "arxiv") return [cfg.category, cfg.keyword].filter(Boolean).join(" + ") || "arxiv";
   return s.type;
-}
-
-function isArxivSource(news: {
-  raw_fetched_items?:
-    | { sources?: { type?: string } | { type?: string }[] | null }
-    | { sources?: { type?: string } | { type?: string }[] | null }[]
-    | null;
-}): boolean {
-  const raw = news.raw_fetched_items ?? null;
-  if (!raw) return false;
-  const rawItem = Array.isArray(raw) ? raw[0] : raw;
-  if (!rawItem) return false;
-  const src = rawItem.sources ?? null;
-  const source = Array.isArray(src) ? src[0] : src;
-  return source?.type === "arxiv";
 }
 
 async function loadPreferencePrompt(supabase: ReturnType<typeof createServiceRoleClient>): Promise<string> {
@@ -55,6 +171,7 @@ export async function runIngestFilterJob(): Promise<{
   ingested: number;
   filtered: number;
   ranked: 0;
+  skipped_stale?: number;
   error?: string;
 }> {
   const supabase = createServiceRoleClient();
@@ -62,6 +179,7 @@ export async function runIngestFilterJob(): Promise<{
     ingested: number;
     filtered: number;
     ranked: 0;
+    skipped_stale?: number;
     error?: string;
   } = { ingested: 0, filtered: 0, ranked: 0 };
 
@@ -73,10 +191,43 @@ export async function runIngestFilterJob(): Promise<{
 
     const preferencePrompt = await loadPreferencePrompt(supabase);
 
+    const staleCutoffIso = new Date(Date.now() - STALE_UNFILTERED_RAW_MAX_AGE_MS).toISOString();
+    const { count: staleToSkip } = await supabase
+      .from("raw_fetched_items")
+      .select("*", { count: "exact", head: true })
+      .is("filtered_at", null)
+      .is("filter_skipped_at", null)
+      .lt("fetched_at", staleCutoffIso);
+
+    const skipStamp = new Date().toISOString();
+    const { error: staleSkipErr } = await supabase
+      .from("raw_fetched_items")
+      .update({
+        filter_skipped_at: skipStamp,
+        filter_skip_reason: "stale_unfiltered",
+      })
+      .is("filtered_at", null)
+      .is("filter_skipped_at", null)
+      .lt("fetched_at", staleCutoffIso);
+    if (staleSkipErr) {
+      throw new Error(`Stale raw skip update failed: ${staleSkipErr.message}`);
+    }
+    result.skipped_stale = staleToSkip ?? 0;
+    if (result.skipped_stale > 0) {
+      console.log(
+        "[daily-job] Marked",
+        result.skipped_stale,
+        "raw_fetched_items as filter_skipped (fetched_at <",
+        staleCutoffIso,
+        ", reason stale_unfiltered) — not sent to LLM"
+      );
+    }
+
     const { data: rawItems } = await supabase
       .from("raw_fetched_items")
       .select("id, title, raw_content, url, source_id, sources(type, config)")
       .is("filtered_at", null)
+      .is("filter_skipped_at", null)
       .order("fetched_at", { ascending: false });
     const { data: existingNewsRows } = await supabase
       .from("news_items")
@@ -91,7 +242,13 @@ export async function runIngestFilterJob(): Promise<{
       seenStories.push({ url: raw.url ?? null, title: raw.title });
     }
     console.log("[daily-job] === Filter phase: LLM include/exclude for each raw item ===");
-    console.log("[daily-job] Filter input: raw items with filtered_at=null:", rawItems?.length ?? 0, "| after URL/title dedupe:", toProcess.length, "items to process");
+    console.log(
+      "[daily-job] Filter input: pending raw (filtered_at and filter_skipped_at null, fetched in last 2d):",
+      rawItems?.length ?? 0,
+      "| after URL/title dedupe:",
+      toProcess.length,
+      "items to process"
+    );
 
     const total = toProcess.length;
     let summarizeCalls = 0;
@@ -184,11 +341,13 @@ export async function runRankingJob(): Promise<{
     const startIso = start.toISOString();
     const { data: recentNews } = await supabase
       .from("news_items")
-      .select("id, title, summary, url, raw_fetched_items(sources(type))")
+      .select("id, title, summary, url, raw_fetched_items(source_id, sources(type))")
       .gte("included_at", startIso)
       .order("included_at", { ascending: false });
-    const items = recentNews || [];
-    console.log("[daily-job] === Rank phase: pick top 10 (+ 1 surprise) from news in rolling last 24h ===");
+    const items = (recentNews || []) as RankableNews[];
+    console.log(
+      "[daily-job] === Rank phase: LLM ranks top 12 → trim to ≤10, max 2 per source ==="
+    );
     console.log(
       "[daily-job] Rank window: included_at >=",
       startIso,
@@ -196,47 +355,14 @@ export async function runRankingJob(): Promise<{
       items.length
     );
     if (items.length > 0) {
-      const rankPrompt = buildRankTop10Prompt(preferencePrompt, items);
+      const rankPrompt = buildRankTop12Prompt(preferencePrompt, items);
       console.log("[daily-job] Rank prompt (exact user message):\n" + rankPrompt);
-      const ranking = await rankTop10(preferencePrompt, items);
-      const rankedIds = new Set(ranking.map((r) => r.news_item_id));
-      const surprisePool = items.filter((i) => !rankedIds.has(i.id));
-      const top9 = ranking.slice(0, 9);
-      const hasSurprise = surprisePool.length > 0;
-      const surpriseId = hasSurprise
-        ? surprisePool[Math.floor(Math.random() * surprisePool.length)].id
-        : null;
-      const final =
-        hasSurprise && surpriseId
-          ? [
-              ...top9.map((r, i) => ({ news_item_id: r.news_item_id, rank: i + 1, is_surprise: false })),
-              { news_item_id: surpriseId, rank: 10, is_surprise: true },
-            ]
-          : ranking.map((r) => ({ ...r, is_surprise: false }));
+      const ranking = await rankTop12(preferencePrompt, items);
+      const final = buildDiverseTopRanking(items, ranking);
 
-      const isArxivById = new Map(items.map((i) => [i.id, isArxivSource(i)]));
-      let arxivCount = final.reduce(
-        (count, r) => count + (isArxivById.get(r.news_item_id) ? 1 : 0),
-        0
-      );
-      if (arxivCount > 2) {
-        const finalIds = new Set(final.map((r) => r.news_item_id));
-        const nonArxivReplacementIds = items
-          .map((i) => i.id)
-          .filter((id) => !finalIds.has(id) && !isArxivById.get(id));
-        for (let i = final.length - 1; i >= 0 && arxivCount > 2; i--) {
-          if (!isArxivById.get(final[i].news_item_id)) continue;
-          const replacementId = nonArxivReplacementIds.shift();
-          if (!replacementId) break;
-          final[i] = { ...final[i], news_item_id: replacementId, is_surprise: false };
-          arxivCount--;
-        }
-        console.log(
-          "[daily-job] Applied arXiv cap: final arXiv count =",
-          arxivCount,
-          "(max 2)"
-        );
-      }
+      final.forEach((row, i) => {
+        row.rank = i + 1;
+      });
       const today = todayEastern();
       await supabase.from("daily_rankings").delete().eq("date", today);
       for (const r of final) {
@@ -244,7 +370,7 @@ export async function runRankingJob(): Promise<{
           news_item_id: r.news_item_id,
           rank: r.rank,
           date: today,
-          is_surprise: "is_surprise" in r ? r.is_surprise : false,
+          is_surprise: r.is_surprise,
         });
         result.ranked++;
       }
@@ -253,7 +379,9 @@ export async function runRankingJob(): Promise<{
         result.ranked,
         "rows to daily_rankings for date",
         today,
-        surprisePool.length > 0 ? "(includes 1 random surprise slot)" : ""
+        "(max",
+        MAX_DIGEST_SLOTS,
+        "slots; may be fewer if source diversity + pool cannot fill)"
       );
     } else {
       console.log("[daily-job] Rank phase skipped: no news_items in last 24h");
@@ -271,6 +399,7 @@ export async function runDailyJob(): Promise<{
   ingested: number;
   filtered: number;
   ranked: number;
+  skipped_stale?: number;
   error?: string;
 }> {
   const first = await runIngestFilterJob();
@@ -279,6 +408,7 @@ export async function runDailyJob(): Promise<{
       ingested: first.ingested,
       filtered: first.filtered,
       ranked: 0,
+      skipped_stale: first.skipped_stale,
       error: first.error,
     };
   }
@@ -287,6 +417,7 @@ export async function runDailyJob(): Promise<{
     ingested: first.ingested,
     filtered: first.filtered,
     ranked: second.ranked,
+    skipped_stale: first.skipped_stale,
     error: second.error,
   };
 }

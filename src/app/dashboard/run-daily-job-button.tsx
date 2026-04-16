@@ -9,6 +9,7 @@ export function RunDailyJobButton() {
     ingested: number;
     filtered: number;
     ranked: number;
+    skipped_stale?: number;
     error?: string;
   } | null>(null);
   const router = useRouter();
@@ -64,6 +65,9 @@ export function RunDailyJobButton() {
             <>
               Ingested {result.ingested} · Included {result.filtered} · Ranked{" "}
               {result.ranked}
+              {typeof result.skipped_stale === "number" && result.skipped_stale > 0
+                ? ` · Skipped stale ${result.skipped_stale}`
+                : ""}
             </>
           )}
         </div>
