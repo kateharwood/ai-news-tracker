@@ -106,8 +106,8 @@ export async function summarizeItem(title: string, rawContent: string): Promise<
   return content.type === "text" ? content.text.trim() : "";
 }
 
-/** Exact user message sent to Claude for rank_top10 (same substitution as `rankTop10`). */
-export function buildRankTop10Prompt(
+/** Exact user message sent to Claude for rank_top12 (same substitution as `rankTop12`). */
+export function buildRankTop12Prompt(
   preferencePrompt: string,
   items: { id: string; title: string; summary: string | null; url: string | null }[]
 ): string {
@@ -117,18 +117,18 @@ export function buildRankTop10Prompt(
         `id: ${i.id}\ntitle: ${i.title}\nsummary: ${i.summary ?? ""}\nurl: ${i.url ?? ""}`
     )
     .join("\n\n");
-  const template = loadPrompt("rank_top10");
+  const template = loadPrompt("rank_top12");
   return substitutePrompt(template, {
     preference_prompt: preferencePrompt,
     items: itemsBlock,
   });
 }
 
-export async function rankTop10(
+export async function rankTop12(
   preferencePrompt: string,
   items: { id: string; title: string; summary: string | null; url: string | null }[]
 ): Promise<{ news_item_id: string; rank: number }[]> {
-  const text = buildRankTop10Prompt(preferencePrompt, items);
+  const text = buildRankTop12Prompt(preferencePrompt, items);
   const res = await createWithFallback({
     model: MODEL,
     max_tokens: MAX_TOKENS,
@@ -139,7 +139,8 @@ export async function rankTop10(
   const jsonMatch = body.match(/\[[\s\S]*\]/);
   if (!jsonMatch) return [];
   const parsed = JSON.parse(jsonMatch[0]) as { news_item_id: string; rank: number }[];
-  return parsed.slice(0, 10);
+  const sorted = [...parsed].sort((a, b) => a.rank - b.rank);
+  return sorted.slice(0, 12);
 }
 
 export async function preferencesToBullets(
