@@ -2,7 +2,10 @@ import Parser from "rss-parser";
 import { createServiceRoleClient } from "@/lib/supabase/service";
 import type { Source } from "./types";
 
-const parser = new Parser();
+/** Cap per-feed HTTP time so one slow host cannot burn the whole ingest invocation (Vercel max 300s). */
+const RSS_FETCH_TIMEOUT_MS = 22_000;
+
+const parser = new Parser({ timeout: RSS_FETCH_TIMEOUT_MS });
 const REDDIT_USER_AGENT = "AI-News-Tracker/1.0";
 
 function isRedditFeedUrl(url: string): boolean {
@@ -83,6 +86,7 @@ export async function fetchRssFeed(url: string): Promise<
             "User-Agent": REDDIT_USER_AGENT,
             Accept: "application/rss+xml, application/xml, text/xml, */*",
           },
+          signal: AbortSignal.timeout(RSS_FETCH_TIMEOUT_MS),
         });
         if (!res.ok) throw new Error(`Status code ${res.status}`);
         const xml = await res.text();

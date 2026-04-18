@@ -166,29 +166,45 @@ async function loadPreferencePrompt(supabase: ReturnType<typeof createServiceRol
   return promptRow?.content ?? "";
 }
 
-/** Ingest feeds and run the LLM filter on unprocessed raw items (same as the frequent cron). */
-export async function runIngestFilterJob(): Promise<{
+type IngestOnlyResult = {
   ingested: number;
+  filtered: 0;
+  ranked: 0;
+  skipped_stale?: undefined;
+  error?: string;
+};
+
+/** RSS ingest only (no LLM). Scheduled as `/api/cron/ingest`. */
+export async function runIngestOnlyJob(): Promise<IngestOnlyResult> {
+  const result: IngestOnlyResult = { ingested: 0, filtered: 0, ranked: 0 };
+  try {
+    console.log("[daily-job] ========== Ingest-only job ==========");
+    const ingestResult = await ingestAll();
+    result.ingested = ingestResult.inserted;
+    console.log("[daily-job] Ingest-only complete: new raw_fetched_items inserted =", result.ingested);
+    console.log("[daily-job] ========== Ingest-only job done:", result, "==========");
+  } catch (err) {
+    result.error = err instanceof Error ? err.message : String(err);
+    console.error("[daily-job] Error:", result.error, err);
+  }
+  return result;
+}
+
+type FilterOnlyResult = {
+  ingested: 0;
   filtered: number;
   ranked: 0;
   skipped_stale?: number;
   error?: string;
-}> {
+};
+
+/** LLM filter on pending raw rows (no ingest). Scheduled as `/api/cron/filter`. */
+export async function runFilterOnlyJob(): Promise<FilterOnlyResult> {
   const supabase = createServiceRoleClient();
-  const result: {
-    ingested: number;
-    filtered: number;
-    ranked: 0;
-    skipped_stale?: number;
-    error?: string;
-  } = { ingested: 0, filtered: 0, ranked: 0 };
+  const result: FilterOnlyResult = { ingested: 0, filtered: 0, ranked: 0 };
 
   try {
-    console.log("[daily-job] ========== Ingest + filter job ==========");
-    const ingestResult = await ingestAll();
-    result.ingested = ingestResult.inserted;
-    console.log("[daily-job] Ingest phase complete: new raw_fetched_items inserted =", result.ingested);
-
+    console.log("[daily-job] ========== Filter-only job ==========");
     const preferencePrompt = await loadPreferencePrompt(supabase);
 
     const staleCutoffIso = new Date(Date.now() - STALE_UNFILTERED_RAW_MAX_AGE_MS).toISOString();
@@ -304,18 +320,45 @@ export async function runIngestFilterJob(): Promise<{
     }
     console.log("[daily-job] Filter phase complete: items included (→ news_items) =", result.filtered);
     console.log(
-      "[daily-job] Claude calls this run (ingest+filter job): filterItem =",
+      "[daily-job] Claude calls this run (filter-only job): filterItem =",
       total,
       "| summarizeItem =",
       summarizeCalls,
       "(extra calls only for included items with no body text)"
     );
-    console.log("[daily-job] ========== Ingest + filter job done:", result, "==========");
+    console.log("[daily-job] ========== Filter-only job done:", result, "==========");
   } catch (err) {
     result.error = err instanceof Error ? err.message : String(err);
     console.error("[daily-job] Error:", result.error, err);
   }
   return result;
+}
+
+/** Ingest then filter in one process (legacy / manual curl). Prefer split crons on Vercel. */
+export async function runIngestFilterJob(): Promise<{
+  ingested: number;
+  filtered: number;
+  ranked: 0;
+  skipped_stale?: number;
+  error?: string;
+}> {
+  const ingest = await runIngestOnlyJob();
+  if (ingest.error) {
+    return {
+      ingested: ingest.ingested,
+      filtered: 0,
+      ranked: 0,
+      error: ingest.error,
+    };
+  }
+  const filter = await runFilterOnlyJob();
+  return {
+    ingested: ingest.ingested,
+    filtered: filter.filtered,
+    ranked: 0,
+    skipped_stale: filter.skipped_stale,
+    error: filter.error,
+  };
 }
 
 /** Rank top stories from candidates included in the rolling last 24 hours (`included_at`). Runs once per day on a schedule. */
@@ -394,7 +437,10 @@ export async function runRankingJob(): Promise<{
   return result;
 }
 
-/** Full pipeline: ingest + filter, then rank. Used by the dashboard manual trigger. */
+/**
+ * Full pipeline in one process: ingest → filter → rank.
+ * On Vercel (300s cap) this often times out; the dashboard uses three `POST /api/run/*` calls instead.
+ */
 export async function runDailyJob(): Promise<{
   ingested: number;
   filtered: number;
@@ -402,22 +448,31 @@ export async function runDailyJob(): Promise<{
   skipped_stale?: number;
   error?: string;
 }> {
-  const first = await runIngestFilterJob();
-  if (first.error) {
+  const ingest = await runIngestOnlyJob();
+  if (ingest.error) {
     return {
-      ingested: first.ingested,
-      filtered: first.filtered,
+      ingested: ingest.ingested,
+      filtered: 0,
       ranked: 0,
-      skipped_stale: first.skipped_stale,
-      error: first.error,
+      error: ingest.error,
     };
   }
-  const second = await runRankingJob();
+  const filter = await runFilterOnlyJob();
+  if (filter.error) {
+    return {
+      ingested: ingest.ingested,
+      filtered: filter.filtered,
+      ranked: 0,
+      skipped_stale: filter.skipped_stale,
+      error: filter.error,
+    };
+  }
+  const rank = await runRankingJob();
   return {
-    ingested: first.ingested,
-    filtered: first.filtered,
-    ranked: second.ranked,
-    skipped_stale: first.skipped_stale,
-    error: second.error,
+    ingested: ingest.ingested,
+    filtered: filter.filtered,
+    ranked: rank.ranked,
+    skipped_stale: filter.skipped_stale,
+    error: rank.error,
   };
 }

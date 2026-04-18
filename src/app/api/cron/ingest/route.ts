@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { runIngestFilterJob } from "@/lib/daily-job";
+import { runIngestOnlyJob } from "@/lib/daily-job";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -10,6 +10,6 @@ export async function GET(request: Request) {
   if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const result = await runIngestFilterJob();
+  const result = await runIngestOnlyJob();
   return NextResponse.json(result);
 }

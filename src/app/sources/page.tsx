@@ -203,7 +203,7 @@ export default async function SourcesPage() {
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded-sm bg-red-200 border border-red-500 shrink-0" aria-hidden />
-            Red: ingest failed 5 runs in a row (e.g. 5 daily fetches with errors — check URL or blocks).
+            Red: ingest failed 5 runs in a row (e.g. 5 scheduled ingest runs with errors — check URL or blocks).
           </span>
         </span>
         <span className="block mt-3 text-zinc-600 max-w-xl">

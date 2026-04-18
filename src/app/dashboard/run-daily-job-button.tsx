@@ -3,33 +3,67 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 
+type PhaseResult = {
+  ingested: number;
+  filtered: number;
+  ranked: number;
+  skipped_stale?: number;
+  error?: string;
+};
+
 export function RunDailyJobButton() {
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<{
-    ingested: number;
-    filtered: number;
-    ranked: number;
-    skipped_stale?: number;
-    error?: string;
-  } | null>(null);
+  const [result, setResult] = useState<PhaseResult | null>(null);
   const router = useRouter();
 
   async function runJob() {
     setLoading(true);
     setResult(null);
     try {
-      const res = await fetch("/api/cron/run", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) {
+      const res1 = await fetch("/api/run/ingest", { method: "POST" });
+      const d1 = await res1.json();
+      if (!res1.ok || d1.error) {
         setResult({
-          ingested: 0,
+          ingested: typeof d1.ingested === "number" ? d1.ingested : 0,
           filtered: 0,
           ranked: 0,
-          error: data.error ?? "Request failed",
+          error: d1.error ?? (res1.ok ? "Ingest failed" : "Request failed"),
         });
         return;
       }
-      setResult(data);
+
+      const res2 = await fetch("/api/run/filter", { method: "POST" });
+      const d2 = await res2.json();
+      if (!res2.ok || d2.error) {
+        setResult({
+          ingested: d1.ingested ?? 0,
+          filtered: typeof d2.filtered === "number" ? d2.filtered : 0,
+          ranked: 0,
+          skipped_stale: d2.skipped_stale,
+          error: d2.error ?? (res2.ok ? "Filter failed" : "Request failed"),
+        });
+        return;
+      }
+
+      const res3 = await fetch("/api/run/rank", { method: "POST" });
+      const d3 = await res3.json();
+      if (!res3.ok || d3.error) {
+        setResult({
+          ingested: d1.ingested ?? 0,
+          filtered: d2.filtered ?? 0,
+          ranked: 0,
+          skipped_stale: d2.skipped_stale,
+          error: d3.error ?? (res3.ok ? "Rank failed" : "Request failed"),
+        });
+        return;
+      }
+
+      setResult({
+        ingested: d1.ingested ?? 0,
+        filtered: d2.filtered ?? 0,
+        ranked: d3.ranked ?? 0,
+        skipped_stale: d2.skipped_stale,
+      });
       router.refresh();
     } finally {
       setLoading(false);

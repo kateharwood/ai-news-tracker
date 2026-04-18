@@ -64,7 +64,8 @@ Personal AI news curator: ingest from RSS, filter and rank with Claude, learn fr
 
 `vercel.json` defines schedules in **UTC**:
 
-- **`/api/cron/daily`** — ingest and filter only (runs every **two hours** on odd UTC hours: `1, 3, 5, …, 23`). Same cadence as before; ranking is **not** part of this route.
+- **`/api/cron/ingest`** — RSS ingest only (runs **every hour** at minute **0** UTC: `0 * * * *`). No LLM calls.
+- **`/api/cron/filter`** — LLM filter on pending raw rows (runs **every hour** at minute **15** UTC: `15 * * * *`), so ingest for that hour can finish first. Does **not** write `daily_rankings`.
 - **`/api/cron/rank-daily`** — builds today’s top 10 from **`news_items`** whose **`included_at`** is in the **rolling last 24 hours** (from `rolling24HoursAgo()` to now). Runs **once per day** at **`0 11 * * *`** (11:00 UTC), **before** the email digest so rankings exist when the digest sends.
 - **`/api/cron/email-digest`** — sends one email per calendar day with today’s top 10 (newspaper-style HTML). Default: **`0 12 * * *`** (12:00 UTC daily, which is **7:00 AM Eastern** during EST or **8:00 AM Eastern** during EDT).
 
@@ -72,10 +73,17 @@ Secure cron routes in production by setting `CRON_SECRET` in the Vercel dashboar
 
 ### Manual triggers
 
-Ingest + filter (same as the frequent cron):
+Ingest only (same as the hourly ingest cron):
 
 ```bash
-curl -X GET "https://your-app.vercel.app/api/cron/daily" \
+curl -X GET "https://your-app.vercel.app/api/cron/ingest" \
+  -H "Authorization: Bearer YOUR_CRON_SECRET"
+```
+
+Filter only (same as the hourly filter cron):
+
+```bash
+curl -X GET "https://your-app.vercel.app/api/cron/filter" \
   -H "Authorization: Bearer YOUR_CRON_SECRET"
 ```
 
@@ -86,7 +94,7 @@ curl -X GET "https://your-app.vercel.app/api/cron/rank-daily" \
   -H "Authorization: Bearer YOUR_CRON_SECRET"
 ```
 
-The dashboard **“Fetch & rank news”** button still runs the **full** pipeline (ingest → filter → rank) in one request.
+The dashboard **“Fetch & rank news”** button runs **three signed-in POSTs** in order — **`/api/run/ingest`**, **`/api/run/filter`**, **`/api/run/rank`** — so each step gets its own **300s** Vercel limit (Hobby-friendly). Legacy **`runIngestFilterJob`** (ingest then filter in one process) remains in code for manual scripting; **`runDailyJob`** still chains all three in one process and can hit the same single-invocation timeout as before.
 
 Email digest (same auth pattern):
 
@@ -103,36 +111,45 @@ If `CRON_SECRET` is not set, the routes still run (useful for local testing only
 
 | Run type | How it starts | Auth | Code path | Touches rankings / raw / news? | LLM? |
 |----------|---------------|------|-----------|-------------------------------|------|
-| **Dashboard “Fetch & rank news”** | `POST /api/cron/run` | Must be **signed in** (Supabase session cookie). No `CRON_SECRET`. | `runDailyJob` → **`runIngestFilterJob`** then **`runRankingJob`** | Yes: ingest → `raw_fetched_items`; filter → `news_items`; rank → `daily_rankings` for **today** (`APP_TIMEZONE`). | **Yes** — every `filterItem` (and optional `summarizeItem`) for the filter queue, then one **`rankTop12`**. |
-| **Cron ingest** | `GET /api/cron/daily` on schedule or manual curl | If `CRON_SECRET` is set: header **`Authorization: Bearer <CRON_SECRET>`**. | **`runIngestFilterJob`** only | Raw + filter only; **does not** write `daily_rankings`. | **Yes** — same filter (and optional summarize) LLMs as the dashboard’s first half. |
+| **Dashboard “Fetch & rank news”** | `POST /api/run/ingest` → `POST /api/run/filter` → `POST /api/run/rank` (sequential, same session) | Must be **signed in** (Supabase session cookie). No `CRON_SECRET`. | **`runIngestOnlyJob`**, then **`runFilterOnlyJob`**, then **`runRankingJob`** | Yes: same DB effects as the three crons above. | **Yes** — same LLM usage as those steps. |
+| **Cron ingest** | `GET /api/cron/ingest` on schedule or manual curl | If `CRON_SECRET` is set: header **`Authorization: Bearer <CRON_SECRET>`**. | **`runIngestOnlyJob`** | Raw ingest only; **no** filter or rankings. | **No** |
+| **Cron filter** | `GET /api/cron/filter` on schedule or manual curl | Same optional Bearer cron secret. | **`runFilterOnlyJob`** | Filter → `news_items`; **does not** write `daily_rankings`. | **Yes** — every `filterItem` (and optional `summarizeItem`) for the filter queue. |
 | **Cron rank** | `GET /api/cron/rank-daily` | Same optional Bearer cron secret. | **`runRankingJob`** only | **No** ingest or filter; only reads `news_items` and writes **`daily_rankings`** for today. | **Yes** — one **`rankTop12`** if the 24h candidate pool is non-empty. |
 | **Email digest** | `GET /api/cron/email-digest` | Same optional Bearer cron secret. | Loads today’s ranking + items, builds HTML, sends via Resend; records **`email_digest_sent`** for that date so the same day is not sent twice. | Reads **`daily_rankings`** / **`news_items`**; **no** ingest/filter/rank. | **No** Claude calls in this route. |
 | **Preference update** | `POST /api/run-preferences` (e.g. after voting from the dashboard) | Signed-in user. | Appends bullets to `preference_prompt`, may condense | Updates **`preference_prompt`** (+ **`preference_bullet_runs`**); does **not** ingest or re-rank by itself. | **Yes** — **`preferencesToBullets`**, and **`condensePrompt`** only if appended text pushes total **over 500 words**. |
 
-**Ordering and failures:** Only the dashboard run executes **ingest + filter** and **rank** back-to-back. If `runIngestFilterJob` throws, `runDailyJob` returns early and **`runRankingJob` does not run**. Scheduled **ingest** and **rank** crons are independent: ranking can run without a preceding ingest in the same request (it uses whatever `news_items` already exist in the rolling 24h window).
+**Ordering and failures:** The dashboard chains **three HTTP requests** so a slow ingest does not consume the same **300s** budget as filter/rank. If **ingest** fails, stop before filter/rank. Scheduled **ingest** (`:00`), **filter** (`:15`), and **rank** crons are independent: **`rank-daily`** can run without ingest in that hour (it uses whatever `news_items` already exist in the rolling 24h window). **`runIngestFilterJob`** (ingest+filter in one invocation) and **`runDailyJob`** (all three in one) remain for scripts but share a single function timeout on Vercel.
 
 **Shared Anthropic call shape (all news + preference LLMs):** `src/lib/claude.ts` sends a **single `user` message** per request (no separate system message in code). Default model: **`ANTHROPIC_MODEL`** env var or **`claude-sonnet-4-6`**; on **404** the client retries once with **`claude-haiku-4-5`**; on **429** it waits using `Retry-When` / `Retry-After` when present, then retries.
 
 ---
 
-### A. Ingest + filter (`runIngestFilterJob`)
+### A. Ingest only (`runIngestOnlyJob`)
 
-Used by: **dashboard full run** (first half) and **`/api/cron/daily`**. No LLMs until step 6.
+Used by: **`GET /api/cron/ingest`**, **`POST /api/run/ingest`**, and as the first half of **`runIngestFilterJob`**. No LLMs.
 
 1. **Load sources** — Read all **enabled** rows from `sources` (each row is an **RSS** feed URL in `config.url`).
 2. **Ingest per source** — For each RSS source in turn: fetch the feed (with retries on some transient errors). Keep only entries whose published time is within the **last 3 hours**; older or undated entries are skipped. Upsert each kept entry into `raw_fetched_items` on `(source_id, external_id)`. On success, reset that source’s ingest failure streak; on failure, increment the streak.
-3. **Load preferences** — Read the single `preference_prompt` row (injected into filter prompts as `{{preference_prompt}}`).
-4. **Skip stale never-filtered rows (no LLM)** — Rows with `filtered_at` null, `filter_skipped_at` null, and **`fetched_at` older than 2 days** are bulk-updated: `filter_skipped_at` = now, `filter_skip_reason` = `stale_unfiltered`. They remain **without** `filtered_at` (never LLM-judged) and are excluded from the queue below. Response field **`skipped_stale`** is how many rows were marked this run.
-5. **Build the filter queue** — Select `raw_fetched_items` where **`filtered_at` and `filter_skipped_at` are both null** (newest `fetched_at` first). Load existing `news_items` (URL + title). Drop any raw row that **duplicates** an existing story: same normalized URL (scheme/host/path, no query/hash) **or** title similarity ≥ **0.85** compared to URLs/titles already seen (including both existing `news_items` and earlier rows in this queue).
-6. **LLM — `filterItem` (Claude), once per queued raw row** — See **[filterItem](#filteritem)**. After each call, **always** set `filtered_at` on that raw row. If the outcome is **EXCLUDED**, skip `news_items` insert for that row. If **INCLUDED**, insert **`news_items`** with `included_at` = now.
-7. **LLM — `summarizeItem` (Claude), only for INCLUDED rows with empty `raw_content`** — If `raw_content` is missing or whitespace-only after trim, **summary** comes from **`summarizeItem`**; otherwise summary is the first **200** characters of trimmed `raw_content`. See **[summarizeItem](#summarizeitem)**.
-8. **Return counts** — `ingested` = successful per-item upserts in step 2; `filtered` = new `news_items` from steps 6–7; `skipped_stale` = rows marked in step 4.
+3. **Return count** — `ingested` = successful per-item upserts in step 2.
 
 ---
 
-### B. Rank (`runRankingJob`)
+### B. Filter only (`runFilterOnlyJob`)
 
-Used by: **dashboard full run** (second half) and **`/api/cron/rank-daily`**.
+Used by: **`GET /api/cron/filter`**, **`POST /api/run/filter`**, and as the second half of **`runIngestFilterJob`**. No ingest.
+
+1. **Load preferences** — Read the single `preference_prompt` row (injected into filter prompts as `{{preference_prompt}}`).
+2. **Skip stale never-filtered rows (no LLM)** — Rows with `filtered_at` null, `filter_skipped_at` null, and **`fetched_at` older than 2 days** are bulk-updated: `filter_skipped_at` = now, `filter_skip_reason` = `stale_unfiltered`. They remain **without** `filtered_at` (never LLM-judged) and are excluded from the queue below. Response field **`skipped_stale`** is how many rows were marked this run.
+3. **Build the filter queue** — Select `raw_fetched_items` where **`filtered_at` and `filter_skipped_at` are both null** (newest `fetched_at` first). Load existing `news_items` (URL + title). Drop any raw row that **duplicates** an existing story: same normalized URL (scheme/host/path, no query/hash) **or** title similarity ≥ **0.85** compared to URLs/titles already seen (including both existing `news_items` and earlier rows in this queue).
+4. **LLM — `filterItem` (Claude), once per queued raw row** — See **[filterItem](#filteritem)**. After each call, **always** set `filtered_at` on that raw row. If the outcome is **EXCLUDED**, skip `news_items` insert for that row. If **INCLUDED**, insert **`news_items`** with `included_at` = now.
+5. **LLM — `summarizeItem` (Claude), only for INCLUDED rows with empty `raw_content`** — If `raw_content` is missing or whitespace-only after trim, **summary** comes from **`summarizeItem`**; otherwise summary is the first **200** characters of trimmed `raw_content`. See **[summarizeItem](#summarizeitem)**.
+6. **Return counts** — `filtered` = new `news_items` from steps 4–5; `skipped_stale` = rows marked in step 2.
+
+---
+
+### C. Rank (`runRankingJob`)
+
+Used by: **`POST /api/run/rank`** (dashboard, third step) and **`GET /api/cron/rank-daily`**.
 
 1. **Load preferences** — Same `preference_prompt` row as filtering.
 2. **Candidate pool** — Select `news_items` (including **`raw_fetched_items.source_id`**) whose `included_at` is **≥ now minus 24 hours** (rolling window).
@@ -147,7 +164,7 @@ Used by: **dashboard full run** (second half) and **`/api/cron/rank-daily`**.
 
 ---
 
-### C. Preference pass (`POST /api/run-preferences`)
+### D. Preference pass (`POST /api/run-preferences`)
 
 Not the same as “fetch news”; it **updates text preferences** from votes.
 
@@ -164,7 +181,7 @@ Placeholders `{{...}}` are string-replaced in code (`src/lib/prompts.ts`). File 
 
 #### filterItem
 
-- **When:** Step A.6, **once per** deduplicated raw row still pending filter (`filtered_at` and `filter_skipped_at` both null).
+- **When:** Step B.4, **once per** deduplicated raw row still pending filter (`filtered_at` and `filter_skipped_at` both null).
 - **User message:** `prompts/filter_item.txt` with:
   - `{{preference_prompt}}` → full `preference_prompt.content` for id `00000000-0000-0000-0000-000000000001`.
   - `{{title}}` → raw row `title`.
@@ -199,7 +216,7 @@ Answer (INCLUDED or EXCLUDED):
 
 #### summarizeItem
 
-- **When:** Step A.7, **only** for an **INCLUDED** item when trimmed `raw_content` is empty.
+- **When:** Step B.5, **only** for an **INCLUDED** item when trimmed `raw_content` is empty.
 - **User message:** `prompts/summarize_item.txt` with `{{title}}`, `{{raw_content}}` (raw body truncated to **3000** chars, may be empty).
 - **API params:** `max_tokens` **256**.
 
@@ -220,7 +237,7 @@ One-sentence summary:
 
 #### rankTop12
 
-- **When:** Step B.4, **once**, if the 24h candidate list is non-empty.
+- **When:** Step C.4, **once**, if the 24h candidate list is non-empty.
 - **User message:** `prompts/rank_top12.txt` with:
   - `{{preference_prompt}}` → same DB field as filter.
   - `{{items}}` → each candidate rendered **exactly** as below, blocks separated by **two** newlines (`\n\n`):
