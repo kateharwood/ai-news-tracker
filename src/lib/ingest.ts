@@ -134,6 +134,65 @@ export async function fetchRssFeed(url: string): Promise<
 
 const INGEST_FAILURE_THRESHOLD = 5;
 
+/** Fetches at or above this duration count as “long” (backing up ingest). */
+const LONG_INGEST_FETCH_MS = 16_000;
+/** Rolling window for stored long-fetch timestamps and UI counts (48h). */
+const INGEST_LONG_FETCH_WINDOW_MS = 48 * 60 * 60 * 1000;
+const MAX_LONG_FETCH_EVENTS = 48;
+
+function isLikelyTimeoutError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /timeout|timed out|aborted|abort|ETIMEDOUT|ECONNRESET|socket hang up|fetch failed/i.test(msg);
+}
+
+async function markIngestAttemptStart(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  sourceId: string
+): Promise<void> {
+  const ts = new Date().toISOString();
+  const { error } = await supabase.from("sources").update({ last_ingest_attempt_at: ts }).eq("id", sourceId);
+  if (error) {
+    console.warn("[ingest] Could not set last_ingest_attempt_at", sourceId, error.message);
+  }
+}
+
+async function recordLongIngestFetchEvent(
+  supabase: ReturnType<typeof createServiceRoleClient>,
+  sourceId: string,
+  elapsedMs: number,
+  err: unknown | null
+): Promise<void> {
+  const timedOut = err !== null && isLikelyTimeoutError(err);
+  const verySlow = elapsedMs >= LONG_INGEST_FETCH_MS;
+  if (!timedOut && !verySlow) return;
+
+  const { data, error: selErr } = await supabase
+    .from("sources")
+    .select("ingest_long_fetch_timestamps")
+    .eq("id", sourceId)
+    .maybeSingle();
+  if (selErr) {
+    console.warn("[ingest] Could not read ingest_long_fetch_timestamps", sourceId, selErr.message);
+    return;
+  }
+  const raw = data?.ingest_long_fetch_timestamps;
+  const arr = Array.isArray(raw) ? raw.filter((t): t is string => typeof t === "string") : [];
+  const cutoff = Date.now() - INGEST_LONG_FETCH_WINDOW_MS;
+  const pruned = arr.filter((t) => {
+    const ms = new Date(t).getTime();
+    return !Number.isNaN(ms) && ms >= cutoff;
+  });
+  pruned.push(new Date().toISOString());
+  const trimmed = pruned.slice(-MAX_LONG_FETCH_EVENTS);
+  const { error: updErr } = await supabase
+    .from("sources")
+    .update({ ingest_long_fetch_timestamps: trimmed })
+    .eq("id", sourceId);
+  if (updErr) {
+    console.warn("[ingest] Could not update ingest_long_fetch_timestamps", sourceId, updErr.message);
+  }
+}
+
 async function resetIngestFailureStreak(
   supabase: ReturnType<typeof createServiceRoleClient>,
   sourceId: string
@@ -205,8 +264,19 @@ export async function ingestAll(): Promise<{ inserted: number }> {
       const fetchedAt = new Date().toISOString();
       if (source.type === "rss" && config.url) {
         const feedUrl = config.url.trim();
+        await markIngestAttemptStart(supabase, source.id);
         console.log("[ingest] === RSS feed:", label, "| URL:", feedUrl, "===");
-        const items = await fetchRssFeed(feedUrl);
+        const t0 = Date.now();
+        let items: Awaited<ReturnType<typeof fetchRssFeed>>;
+        try {
+          items = await fetchRssFeed(feedUrl);
+        } catch (fetchErr) {
+          const elapsed = Date.now() - t0;
+          await recordLongIngestFetchEvent(supabase, source.id, elapsed, fetchErr);
+          throw fetchErr;
+        }
+        const elapsedOk = Date.now() - t0;
+        await recordLongIngestFetchEvent(supabase, source.id, elapsedOk, null);
         let newFromFeed = 0;
         for (const item of items) {
           const { error } = await supabase.from("raw_fetched_items").upsert(

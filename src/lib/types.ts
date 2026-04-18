@@ -8,6 +8,10 @@ export interface Source {
   created_at: string;
   /** Consecutive ingest runs that threw (reset on success). */
   ingest_failure_streak?: number;
+  /** When ingest last began this feed (before fetch). Null if never reached. */
+  last_ingest_attempt_at?: string | null;
+  /** ISO timestamps of slow or timeout RSS fetches; pruned server-side to ~48h. */
+  ingest_long_fetch_timestamps?: string[] | null;
 }
 
 export interface RawFetchedItem {

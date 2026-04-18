@@ -92,7 +92,9 @@ export default async function SourcesPage() {
   } = await userClient.auth.getUser();
   const { data: sources, error: sourcesError } = await supabase
     .from("sources")
-    .select("id, type, config, enabled, created_at, ingest_failure_streak")
+    .select(
+      "id, type, config, enabled, created_at, ingest_failure_streak, last_ingest_attempt_at, ingest_long_fetch_timestamps"
+    )
     .order("created_at", { ascending: false });
   if (sourcesError) {
     console.warn("[sources] failed to load sources:", sourcesError.message);
@@ -202,8 +204,12 @@ export default async function SourcesPage() {
             Orange: no feed items with pubdates in the last 3 months.
           </span>
           <span className="inline-flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-sm bg-yellow-200 border border-yellow-500 shrink-0" aria-hidden />
+            Yellow: enabled feed had no ingest attempt in the last 48h (often queued after slower feeds — full ingest hit the 300s limit before this URL ran).
+          </span>
+          <span className="inline-flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded-sm bg-red-200 border border-red-500 shrink-0" aria-hidden />
-            Red: ingest failed 5 runs in a row (e.g. 5 scheduled ingest runs with errors — check URL or blocks).
+            Red: ingest failed 5 runs in a row, or 2+ very slow/timeout fetches in 48h (check URL, blocks, or move feed earlier in the list).
           </span>
         </span>
         <span className="block mt-3 text-zinc-600 max-w-xl">

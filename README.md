@@ -27,7 +27,7 @@ Personal AI news curator: ingest from RSS, filter and rank with Claude, learn fr
 2. **Supabase**
 
    - Create a project at [supabase.com](https://supabase.com).
-   - Apply all migrations in `supabase/migrations/` in order (`001` … `011`), or run `supabase db push` if you use the Supabase CLI. The initial schema is in `001_initial.sql`; later files add columns and tables (e.g. `daily_rankings.is_surprise`, `email_digest_sent`, `raw_fetched_items.filter_skipped_at`, migration `010` narrows `sources` to RSS-only, migration `011` adds view `source_filtered_counts` for exact per-source filter totals on the Sources page).
+   - Apply all migrations in `supabase/migrations/` in order (`001` … `012`), or run `supabase db push` if you use the Supabase CLI. The initial schema is in `001_initial.sql`; later files add columns and tables (e.g. `daily_rankings.is_surprise`, `email_digest_sent`, `raw_fetched_items.filter_skipped_at`, migration `010` narrows `sources` to RSS-only, migration `011` adds view `source_filtered_counts`, migration `012` adds `sources.last_ingest_attempt_at` and `ingest_long_fetch_timestamps` for Sources page ingest health).
    - In Authentication → Providers, keep Email enabled. For **closed sign-up**, either:
      - Disable “Allow new signups” in Authentication → Providers → Email, and create your user via Supabase dashboard (Authentication → Users → Add user), or
      - Use an invite-only flow (e.g. only allow listed emails).

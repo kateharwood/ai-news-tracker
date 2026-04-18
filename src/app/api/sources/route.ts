@@ -11,7 +11,9 @@ export async function GET() {
   }
   const { data, error } = await supabase
     .from("sources")
-    .select("id, type, config, enabled, created_at, ingest_failure_streak")
+    .select(
+      "id, type, config, enabled, created_at, ingest_failure_streak, last_ingest_attempt_at, ingest_long_fetch_timestamps"
+    )
     .order("created_at", { ascending: false });
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });

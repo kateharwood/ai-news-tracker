@@ -3,6 +3,9 @@
 import { useEffect, useState } from "react";
 
 const INGEST_ERROR_STREAK_RED = 5;
+/** Two or more long/timeout fetches in 48h also triggers red row. */
+const LONG_FETCH_EVENTS_RED = 2;
+const INGEST_HEALTH_48H_MS = 48 * 60 * 60 * 1000;
 
 type SourceRow = {
   id: string;
@@ -11,7 +14,30 @@ type SourceRow = {
   enabled: boolean;
   created_at: string;
   ingest_failure_streak?: number;
+  last_ingest_attempt_at?: string | null;
+  ingest_long_fetch_timestamps?: string[] | null;
 };
+
+function longFetchCount48h(timestamps: string[] | null | undefined, nowMs: number): number {
+  if (!timestamps?.length) return 0;
+  const cutoff = nowMs - INGEST_HEALTH_48H_MS;
+  return timestamps.filter((t) => {
+    const ms = new Date(t).getTime();
+    return !Number.isNaN(ms) && ms >= cutoff;
+  }).length;
+}
+
+/** Ingest has not started this feed in 48h while enabled (often starvation when ingest times out early). */
+function isIngestStarved(s: SourceRow, nowMs: number): boolean {
+  if (!s.enabled) return false;
+  const createdMs = new Date(s.created_at).getTime();
+  if (Number.isNaN(createdMs)) return false;
+  const lastMs = s.last_ingest_attempt_at ? new Date(s.last_ingest_attempt_at).getTime() : NaN;
+  if (Number.isNaN(lastMs)) {
+    return nowMs - createdMs >= INGEST_HEALTH_48H_MS;
+  }
+  return nowMs - lastMs >= INGEST_HEALTH_48H_MS;
+}
 
 type SourceStats = {
   upvotes: number;
@@ -137,6 +163,7 @@ export function SourcesList({
         {sortedSources.map((s) => {
           const config = s.config as { url?: string; category?: string; keyword?: string };
           const stats = statsFor(s.id);
+          const nowMs = Date.now();
           const label =
             s.type === "rss" && config.url
               ? (() => {
@@ -149,13 +176,25 @@ export function SourcesList({
               : s.type;
           const isStale = staleIds.has(s.id);
           const streak = s.ingest_failure_streak ?? 0;
-          const isIngestError = streak >= INGEST_ERROR_STREAK_RED;
+          const longFetch48h = longFetchCount48h(s.ingest_long_fetch_timestamps, nowMs);
+          const isIngestRed = streak >= INGEST_ERROR_STREAK_RED || longFetch48h >= LONG_FETCH_EVENTS_RED;
+          const isStarved = !isIngestRed && isIngestStarved(s, nowMs);
           const sortScore = sourceEngagementScore(stats);
-          const rowClass = isIngestError
+          const rowClass = isIngestRed
             ? "bg-red-50/90 border-red-400 ring-1 ring-red-200/70"
-            : isStale
-              ? "bg-orange-50/80 border-orange-300 ring-1 ring-orange-200/60"
-              : "bg-white border-zinc-200";
+            : isStarved
+              ? "bg-yellow-50/90 border-yellow-400 ring-1 ring-yellow-200/70"
+              : isStale
+                ? "bg-orange-50/80 border-orange-300 ring-1 ring-orange-200/60"
+                : "bg-white border-zinc-200";
+          const redParts: string[] = [];
+          if (streak >= INGEST_ERROR_STREAK_RED) {
+            redParts.push(`failed ${streak}× in a row`);
+          }
+          if (longFetch48h >= LONG_FETCH_EVENTS_RED) {
+            redParts.push(`${longFetch48h} slow/timeout fetch${longFetch48h === 1 ? "" : "es"} (48h)`);
+          }
+          const redLabel = redParts.length ? `Ingest: ${redParts.join(" · ")}` : "";
           return (
             <li
               key={s.id}
@@ -165,9 +204,14 @@ export function SourcesList({
                 <div className="font-medium text-zinc-800 capitalize flex flex-wrap items-center gap-2">
                   RSS
                   <span className="text-zinc-600 font-normal">{label}</span>
-                  {isIngestError && (
+                  {isIngestRed && (
                     <span className="text-xs font-medium text-red-800 bg-red-100 px-2 py-0.5 rounded">
-                      Ingest failed {streak}× in a row
+                      {redLabel}
+                    </span>
+                  )}
+                  {isStarved && (
+                    <span className="text-xs font-medium text-yellow-900 bg-yellow-100 px-2 py-0.5 rounded">
+                      No ingest attempt in 48h (may be starved behind slower feeds)
                     </span>
                   )}
                 </div>
