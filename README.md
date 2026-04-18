@@ -62,10 +62,10 @@ Personal AI news curator: ingest from RSS, filter and rank with Claude, learn fr
 
 ## Cron jobs (Vercel)
 
-`vercel.json` defines schedules in **UTC**:
+`vercel.json` defines schedules in **UTC**. On **Vercel Hobby**, each cron job may run **at most once per day**; expressions like `0 * * * *` (hourly in one job) **fail deploy**. This repo uses **separate cron entries** per UTC hour so ingest and filter still run **hourly in effect** while each job’s expression fires once per day — see [Usage & pricing for cron jobs](https://vercel.com/docs/cron-jobs/usage-and-pricing). On **Pro**, you could instead use one job per path with `0 * * * *` and `15 * * * *`; the split here remains valid on all plans.
 
-- **`/api/cron/ingest`** — RSS ingest only (runs **every hour** at minute **0** UTC: `0 * * * *`). No LLM calls.
-- **`/api/cron/filter`** — LLM filter on pending raw rows (runs **every hour** at minute **15** UTC: `15 * * * *`), so ingest for that hour can finish first. Does **not** write `daily_rankings`.
+- **`/api/cron/ingest`** — RSS ingest only. **24 cron jobs** (`0 0 * * *` … `0 23 * * *`): one run per clock hour at **:00** UTC. No LLM calls.
+- **`/api/cron/filter`** — LLM filter on pending raw rows. **24 cron jobs** (`15 0 * * *` … `15 23 * * *`): one run per hour at **:15** UTC so that hour’s ingest can finish first. Does **not** write `daily_rankings`.
 - **`/api/cron/rank-daily`** — builds today’s top 10 from **`news_items`** whose **`included_at`** is in the **rolling last 24 hours** (from `rolling24HoursAgo()` to now). Runs **once per day** at **`0 11 * * *`** (11:00 UTC), **before** the email digest so rankings exist when the digest sends.
 - **`/api/cron/email-digest`** — sends one email per calendar day with today’s top 10 (newspaper-style HTML). Default: **`0 12 * * *`** (12:00 UTC daily, which is **7:00 AM Eastern** during EST or **8:00 AM Eastern** during EDT).
 
@@ -118,7 +118,7 @@ If `CRON_SECRET` is not set, the routes still run (useful for local testing only
 | **Email digest** | `GET /api/cron/email-digest` | Same optional Bearer cron secret. | Loads today’s ranking + items, builds HTML, sends via Resend; records **`email_digest_sent`** for that date so the same day is not sent twice. | Reads **`daily_rankings`** / **`news_items`**; **no** ingest/filter/rank. | **No** Claude calls in this route. |
 | **Preference update** | `POST /api/run-preferences` (e.g. after voting from the dashboard) | Signed-in user. | Appends bullets to `preference_prompt`, may condense | Updates **`preference_prompt`** (+ **`preference_bullet_runs`**); does **not** ingest or re-rank by itself. | **Yes** — **`preferencesToBullets`**, and **`condensePrompt`** only if appended text pushes total **over 500 words**. |
 
-**Ordering and failures:** The dashboard chains **three HTTP requests** so a slow ingest does not consume the same **300s** budget as filter/rank. If **ingest** fails, stop before filter/rank. Scheduled **ingest** (`:00`), **filter** (`:15`), and **rank** crons are independent: **`rank-daily`** can run without ingest in that hour (it uses whatever `news_items` already exist in the rolling 24h window). **`runIngestFilterJob`** (ingest+filter in one invocation) and **`runDailyJob`** (all three in one) remain for scripts but share a single function timeout on Vercel.
+**Ordering and failures:** The dashboard chains **three HTTP requests** so a slow ingest does not consume the same **300s** budget as filter/rank. If **ingest** fails, stop before filter/rank. Scheduled **ingest** (each UTC hour **:00**) and **filter** (**:15**) are independent: **`rank-daily`** can run without a recent ingest (it uses whatever `news_items` already exist in the rolling 24h window). **`runIngestFilterJob`** (ingest+filter in one invocation) and **`runDailyJob`** (all three in one) remain for scripts but share a single function timeout on Vercel.
 
 **Shared Anthropic call shape (all news + preference LLMs):** `src/lib/claude.ts` sends a **single `user` message** per request (no separate system message in code). Default model: **`ANTHROPIC_MODEL`** env var or **`claude-sonnet-4-6`**; on **404** the client retries once with **`claude-haiku-4-5`**; on **429** it waits using `Retry-When` / `Retry-After` when present, then retries.
 
