@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { parseVoteBody } from "@/lib/vote-validation";
 import { createClient } from "@/lib/supabase/server";
 
 export async function POST(request: Request) {
@@ -9,11 +10,11 @@ export async function POST(request: Request) {
   if (!user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const body = await request.json();
-  const { news_item_id, direction } = body;
-  if (!news_item_id || !direction || !["up", "down"].includes(direction)) {
+  const parsed = parseVoteBody(await request.json());
+  if (!parsed.ok) {
     return NextResponse.json({ error: "Bad request" }, { status: 400 });
   }
+  const { news_item_id, direction } = parsed;
   const { error } = await supabase.from("votes").upsert(
     {
       user_id: user.id,

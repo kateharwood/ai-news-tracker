@@ -1,5 +1,6 @@
 import Parser from "rss-parser";
 import { createServiceRoleClient } from "@/lib/supabase/service";
+import { isLikelyTimeoutError, isRedditFeedUrl, itemDate, redditFeedUrl } from "@/lib/ingest-helpers";
 import type { Source } from "./types";
 
 /** Cap per-feed HTTP time so one slow host cannot burn the whole ingest invocation (Vercel max 300s). */
@@ -7,29 +8,6 @@ const RSS_FETCH_TIMEOUT_MS = 22_000;
 
 const parser = new Parser({ timeout: RSS_FETCH_TIMEOUT_MS });
 const REDDIT_USER_AGENT = "AI-News-Tracker/1.0";
-
-function isRedditFeedUrl(url: string): boolean {
-  try {
-    return new URL(url.trim()).hostname.toLowerCase().includes("reddit.com");
-  } catch {
-    return false;
-  }
-}
-
-/** Reddit serves RSS at path ending in .rss; normalize so we hit the feed. */
-function redditFeedUrl(url: string): string {
-  const trimmed = url.trim();
-  try {
-    const u = new URL(trimmed);
-    const path = u.pathname.replace(/\/+$/, "") || "/";
-    if (!path.toLowerCase().endsWith(".rss")) {
-      u.pathname = path + ".rss";
-    }
-    return u.toString();
-  } catch {
-    return trimmed;
-  }
-}
 
 /** Only keep ingested items whose published date is within this window (RSS). */
 const INGEST_RECENT_HOURS = 3;
@@ -57,13 +35,6 @@ async function fetchWithRetry<T>(fn: () => Promise<T>, context: string): Promise
     }
   }
   throw lastErr;
-}
-
-function itemDate(item: { pubDate?: string; isoDate?: string }): Date | null {
-  const raw = item.isoDate || item.pubDate;
-  if (!raw) return null;
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 export async function fetchRssFeed(url: string): Promise<
@@ -139,11 +110,6 @@ const LONG_INGEST_FETCH_MS = 16_000;
 /** Rolling window for stored long-fetch timestamps and UI counts (48h). */
 const INGEST_LONG_FETCH_WINDOW_MS = 48 * 60 * 60 * 1000;
 const MAX_LONG_FETCH_EVENTS = 48;
-
-function isLikelyTimeoutError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /timeout|timed out|aborted|abort|ETIMEDOUT|ECONNRESET|socket hang up|fetch failed/i.test(msg);
-}
 
 async function markIngestAttemptStart(
   supabase: ReturnType<typeof createServiceRoleClient>,

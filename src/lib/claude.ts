@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { NotFoundError, RateLimitError } from "@anthropic-ai/sdk";
 import { loadPrompt, substitutePrompt } from "./prompts";
 
 const client = new Anthropic({
@@ -11,11 +11,10 @@ const MAX_TOKENS = 1024;
 const DEFAULT_429_DELAY_MS = 5000;
 const MAX_429_DELAY_MS = 60_000;
 
-function getRetryAfterMs(headers: Record<string, string> | undefined): number {
-  if (!headers) return DEFAULT_429_DELAY_MS;
+function getRetryAfterMs(headers: Headers): number {
   const raw =
-    (headers as Record<string, string | undefined>)["retry-after"] ??
-    (headers as Record<string, string | undefined>)["Retry-After"];
+    headers.get("retry-after") ??
+    headers.get("Retry-After");
   if (raw == null || raw === "") return DEFAULT_429_DELAY_MS;
   const sec = parseInt(raw, 10);
   if (!Number.isNaN(sec) && sec >= 0) {
@@ -29,26 +28,42 @@ function getRetryAfterMs(headers: Record<string, string> | undefined): number {
   return DEFAULT_429_DELAY_MS;
 }
 
+/** Normalize model text for filter_step outcome ( substring match ). */
+export function interpretFilterDecision(modelText: string): "INCLUDED" | "EXCLUDED" {
+  const upper = modelText.trim().toUpperCase();
+  return upper.includes("INCLUDED") ? "INCLUDED" : "EXCLUDED";
+}
+
+/** Parse first JSON array of `{ news_item_id, rank }` from model output. */
+export function parseRankTop12FromModelText(body: string): { news_item_id: string; rank: number }[] {
+  const jsonMatch = body.match(/\[[\s\S]*\]/);
+  if (!jsonMatch) return [];
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as { news_item_id: string; rank: number }[];
+    if (!Array.isArray(parsed)) return [];
+    const sorted = [...parsed].sort((a, b) => a.rank - b.rank);
+    return sorted.slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
 async function createWithFallback(
   params: { model: string; max_tokens: number; messages: { role: "user"; content: string }[] }
 ) {
   try {
     return await client.messages.create({ ...params, model: params.model ?? MODEL });
   } catch (err: unknown) {
-    const status = err && typeof err === "object" && "status" in err ? (err as { status: number }).status : 0;
-    const headers =
-      err && typeof err === "object" && "headers" in err
-        ? (err as { headers?: Record<string, string> }).headers
-        : undefined;
-
-    if (status === 429) {
-      const delayMs = getRetryAfterMs(headers);
-      console.warn("[claude] Rate limited (429), retrying after", delayMs, "ms (Retry-After:", headers?.["retry-after"] ?? "none", ")");
+    if (err instanceof RateLimitError) {
+      const delayMs = getRetryAfterMs(err.headers);
+      const retryAfter =
+        err.headers.get("retry-after") ?? err.headers.get("Retry-After") ?? "none";
+      console.warn("[claude] Rate limited (429), retrying after", delayMs, "ms (Retry-After:", retryAfter, ")");
       await new Promise((r) => setTimeout(r, delayMs));
       return await client.messages.create({ ...params, model: params.model ?? MODEL });
     }
 
-    if (status === 404 && params.model !== BACKUP_MODEL) {
+    if (err instanceof NotFoundError && params.model !== BACKUP_MODEL) {
       console.warn("[claude] Model not found, retrying with backup:", BACKUP_MODEL);
       return await client.messages.create({ ...params, model: BACKUP_MODEL });
     }
@@ -85,10 +100,8 @@ export async function filterItem(
     messages: [{ role: "user", content: text }],
   });
   const content = res.content[0];
-  const body =
-    content.type === "text" ? content.text : "";
-  const upper = body.trim().toUpperCase();
-  return upper.includes("INCLUDED") ? "INCLUDED" : "EXCLUDED";
+  const body = content.type === "text" ? content.text : "";
+  return interpretFilterDecision(body);
 }
 
 export async function summarizeItem(title: string, rawContent: string): Promise<string> {
@@ -136,11 +149,7 @@ export async function rankTop12(
   });
   const content = res.content[0];
   const body = content.type === "text" ? content.text : "";
-  const jsonMatch = body.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) return [];
-  const parsed = JSON.parse(jsonMatch[0]) as { news_item_id: string; rank: number }[];
-  const sorted = [...parsed].sort((a, b) => a.rank - b.rank);
-  return sorted.slice(0, 12);
+  return parseRankTop12FromModelText(body);
 }
 
 export async function preferencesToBullets(
