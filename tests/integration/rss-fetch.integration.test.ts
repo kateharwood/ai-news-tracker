@@ -1,6 +1,5 @@
 import { http, HttpResponse } from "msw";
 import { setupServer } from "msw/node";
-import nock from "nock";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { rss2Body } from "../helpers/rss-fixtures";
@@ -24,7 +23,6 @@ describe("fetchRssFeed (HTTP contract)", () => {
   );
   afterEach(() => {
     rssServer.resetHandlers();
-    nock.cleanAll();
     vi.useRealTimers();
   });
   afterAll(() => rssServer.close());
@@ -53,7 +51,7 @@ describe("fetchRssFeed (HTTP contract)", () => {
     expect(rows[0].link).toMatch(/reddit/);
   });
 
-  test("generic parseURL path uses node http (nock) and skips items older than 3h", async () => {
+  test("generic RSS path uses fetch + parseString and skips items older than 3h", async () => {
     vi.useFakeTimers({ now: new Date("2026-05-02T15:00:00.000Z").getTime() });
 
     const xml = rss2Body([
@@ -73,7 +71,11 @@ describe("fetchRssFeed (HTTP contract)", () => {
       },
     ]);
 
-    nock("https://feeds.example.org").get("/news.xml").reply(200, xml, { "Content-Type": "application/rss+xml; charset=utf-8" });
+    rssServer.use(
+      http.get("https://feeds.example.org/news.xml", () =>
+        HttpResponse.text(xml, { headers: { "Content-Type": "application/rss+xml; charset=utf-8" } })
+      )
+    );
 
     const rows = await fetchRssFeed("https://feeds.example.org/news.xml");
     expect(rows).toHaveLength(1);

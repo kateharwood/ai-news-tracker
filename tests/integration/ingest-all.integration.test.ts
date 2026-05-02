@@ -1,16 +1,20 @@
-import nock from "nock";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { http, HttpResponse } from "msw";
+import { setupServer } from "msw/node";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 import { rss2Body } from "../helpers/rss-fixtures";
 import { assertSupabaseQueueEmpty, seedSupabaseQueue } from "../helpers/supabase-queue-mock";
 
 vi.mock("@/lib/supabase/service", () => import("../helpers/supabase-service-test"));
 
-describe("ingestAll (mocked Supabase + RSS via nock)", () => {
+describe("ingestAll (mocked Supabase + RSS via MSW)", () => {
+  const server = setupServer();
+  beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
   afterEach(() => {
-    nock.cleanAll();
+    server.resetHandlers();
     vi.useRealTimers();
   });
+  afterAll(() => server.close());
 
   test("loads enabled rss sources and upserts each recent feed item", async () => {
     vi.useFakeTimers({ now: new Date("2026-05-02T15:30:00.000Z").getTime() });
@@ -32,9 +36,11 @@ describe("ingestAll (mocked Supabase + RSS via nock)", () => {
       },
     ]);
 
-    nock("https://feedsfixture.example")
-      .get("/ai.xml")
-      .reply(200, xml, { "Content-Type": "application/rss+xml" });
+    server.use(
+      http.get("https://feedsfixture.example/ai.xml", () =>
+        HttpResponse.text(xml, { headers: { "Content-Type": "application/rss+xml" } })
+      )
+    );
 
     seedSupabaseQueue([
       {
@@ -58,7 +64,6 @@ describe("ingestAll (mocked Supabase + RSS via nock)", () => {
     const { inserted } = await ingestAll();
 
     expect(inserted).toBe(2);
-    expect(nock.isDone()).toBe(true);
     assertSupabaseQueueEmpty();
   });
 
@@ -82,7 +87,11 @@ describe("ingestAll (mocked Supabase + RSS via nock)", () => {
       },
     ]);
 
-    nock("https://feedsfixture.example").get("/partial.xml").reply(200, xml, { "Content-Type": "application/rss+xml" });
+    server.use(
+      http.get("https://feedsfixture.example/partial.xml", () =>
+        HttpResponse.text(xml, { headers: { "Content-Type": "application/rss+xml" } })
+      )
+    );
 
     seedSupabaseQueue([
       {

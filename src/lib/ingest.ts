@@ -7,7 +7,12 @@ import type { Source } from "./types";
 const RSS_FETCH_TIMEOUT_MS = 22_000;
 
 const parser = new Parser({ timeout: RSS_FETCH_TIMEOUT_MS });
-const REDDIT_USER_AGENT = "AI-News-Tracker/1.0";
+/** Used for all RSS HTTP fetches; `rss-parser`'s default client is blocked by some hosts (403). */
+const RSS_FETCH_USER_AGENT = "AI-News-Tracker/1.0";
+const RSS_FETCH_HEADERS = {
+  "User-Agent": RSS_FETCH_USER_AGENT,
+  Accept: "application/rss+xml, application/xml, text/xml, */*",
+} as const;
 
 /** Only keep ingested items whose published date is within this window (RSS). */
 const INGEST_RECENT_HOURS = 3;
@@ -48,25 +53,16 @@ export async function fetchRssFeed(url: string): Promise<
 > {
   const trimmed = url.trim();
   const isReddit = isRedditFeedUrl(trimmed);
-  const feed = await fetchWithRetry(
-    async () => {
-      if (isReddit) {
-        const feedUrl = redditFeedUrl(trimmed);
-        const res = await fetch(feedUrl, {
-          headers: {
-            "User-Agent": REDDIT_USER_AGENT,
-            Accept: "application/rss+xml, application/xml, text/xml, */*",
-          },
-          signal: AbortSignal.timeout(RSS_FETCH_TIMEOUT_MS),
-        });
-        if (!res.ok) throw new Error(`Status code ${res.status}`);
-        const xml = await res.text();
-        return parser.parseString(xml);
-      }
-      return parser.parseURL(trimmed);
-    },
-    "RSS"
-  );
+  const feed = await fetchWithRetry(async () => {
+    const feedUrl = isReddit ? redditFeedUrl(trimmed) : trimmed;
+    const res = await fetch(feedUrl, {
+      headers: RSS_FETCH_HEADERS,
+      signal: AbortSignal.timeout(RSS_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`Status code ${res.status}`);
+    const xml = await res.text();
+    return parser.parseString(xml);
+  }, "RSS");
   const cutoff = new Date(Date.now() - INGEST_RECENT_WINDOW_MS);
   const all = feed.items || [];
   const recent = all
