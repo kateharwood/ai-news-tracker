@@ -15,6 +15,36 @@ const PREFERENCE_PROMPT_ID = "00000000-0000-0000-0000-000000000001";
 
 /** Raw rows older than this (by `fetched_at`) with `filtered_at` still null are marked skipped, not LLM-filtered. */
 const STALE_UNFILTERED_RAW_MAX_AGE_MS = 2 * 24 * 60 * 60 * 1000;
+/** Supabase/PostgREST default max rows per request — must page past this for dedupe. */
+const NEWS_DEDUPE_PAGE_SIZE = 1000;
+
+async function loadExistingNewsForDedupe(
+  supabase: ReturnType<typeof createServiceRoleClient>
+): Promise<{
+  stories: { url: string | null; title: string }[];
+  rawIdsWithNews: Set<string>;
+}> {
+  const stories: { url: string | null; title: string }[] = [];
+  const rawIdsWithNews = new Set<string>();
+  for (let from = 0; ; from += NEWS_DEDUPE_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from("news_items")
+      .select("raw_fetched_item_id, url, title")
+      .range(from, from + NEWS_DEDUPE_PAGE_SIZE - 1);
+    if (error) {
+      throw new Error(`Failed to load news_items for dedupe: ${error.message}`);
+    }
+    if (!data?.length) break;
+    for (const row of data) {
+      if (typeof row.raw_fetched_item_id === "string") {
+        rawIdsWithNews.add(row.raw_fetched_item_id);
+      }
+      stories.push({ url: row.url ?? null, title: row.title ?? "" });
+    }
+    if (data.length < NEWS_DEDUPE_PAGE_SIZE) break;
+  }
+  return { stories, rawIdsWithNews };
+}
 
 function sourceLabel(s: { type?: string; config?: { url?: string; category?: string; keyword?: string } } | null): string {
   if (!s?.type) return "unknown";
@@ -117,23 +147,43 @@ export async function runFilterOnlyJob(): Promise<FilterOnlyResult> {
       .is("filtered_at", null)
       .is("filter_skipped_at", null)
       .order("fetched_at", { ascending: false });
-    const { data: existingNewsRows } = await supabase
-      .from("news_items")
-      .select("raw_fetched_item_id, url, title");
-    const existingStories = (existingNewsRows || []).map((r) => ({ url: r.url, title: r.title }));
+    const { stories: existingStories, rawIdsWithNews } = await loadExistingNewsForDedupe(supabase);
 
     const toProcess: NonNullable<typeof rawItems> = [];
     const seenStories: { url: string | null; title: string }[] = [...existingStories];
+    const duplicateRawIds: string[] = [];
     for (const raw of rawItems || []) {
-      if (isDuplicate(raw.url ?? null, raw.title, seenStories)) continue;
+      if (rawIdsWithNews.has(raw.id) || isDuplicate(raw.url ?? null, raw.title, seenStories)) {
+        duplicateRawIds.push(raw.id);
+        continue;
+      }
       toProcess.push(raw);
       seenStories.push({ url: raw.url ?? null, title: raw.title });
+    }
+    if (duplicateRawIds.length > 0) {
+      const dupStamp = new Date().toISOString();
+      const { error: dupSkipErr } = await supabase
+        .from("raw_fetched_items")
+        .update({
+          filter_skipped_at: dupStamp,
+          filter_skip_reason: "duplicate_of_existing_news",
+        })
+        .in("id", duplicateRawIds);
+      if (dupSkipErr) {
+        console.warn("[daily-job] Could not mark duplicate raw rows skipped:", dupSkipErr.message);
+      } else {
+        console.log(
+          "[daily-job] Marked",
+          duplicateRawIds.length,
+          "pending raw rows as filter_skipped (duplicate_of_existing_news) — not sent to LLM"
+        );
+      }
     }
     console.log("[daily-job] === Filter phase: LLM include/exclude for each raw item ===");
     console.log(
       "[daily-job] Filter input: pending raw (filtered_at and filter_skipped_at null, fetched in last 2d):",
       rawItems?.length ?? 0,
-      "| after URL/title dedupe:",
+      "| after URL/title/raw-id dedupe:",
       toProcess.length,
       "items to process"
     );
@@ -167,6 +217,11 @@ export async function runFilterOnlyJob(): Promise<FilterOnlyResult> {
         .update({ filtered_at: now })
         .eq("id", raw.id);
       if (decision !== "INCLUDED") continue;
+      // Belt-and-suspenders: never recirculate the same raw row into news_items.
+      if (rawIdsWithNews.has(raw.id)) {
+        console.warn("[daily-job] Skipping news insert; raw already has news_items:", raw.id);
+        continue;
+      }
       let summary: string | null =
         (raw.raw_content && raw.raw_content.trim().length > 0)
           ? raw.raw_content.slice(0, 200).trim()
@@ -187,6 +242,7 @@ export async function runFilterOnlyJob(): Promise<FilterOnlyResult> {
         .select("id")
         .single();
       if (inserted) {
+        rawIdsWithNews.add(raw.id);
         result.filtered++;
       }
     }

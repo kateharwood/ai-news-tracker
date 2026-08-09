@@ -90,6 +90,8 @@ describe("runFilterOnlyJob (mocked Supabase + Anthropic API)", () => {
         data: [{ url: "https://news.example/feature", title: "Older saved copy" }],
         error: null,
       },
+      // mark duplicate_of_existing_news
+      { error: null },
     ]);
 
     const { runFilterOnlyJob } = await import("@/lib/daily-job");
@@ -129,6 +131,8 @@ describe("runFilterOnlyJob (mocked Supabase + Anthropic API)", () => {
         error: null,
       },
       { data: [], error: null },
+      // mark in-queue URL duplicate as filter_skipped
+      { error: null },
       { error: null },
       { data: { id: "news-one" }, error: null },
     ]);
