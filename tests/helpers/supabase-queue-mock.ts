@@ -62,6 +62,8 @@ function chainSelect() {
     lt: () => self,
     gte: () => self,
     order: () => self,
+    range: () => self,
+    in: () => self,
     maybeSingle: () => self,
     single: () => self,
     ...terminal,
@@ -75,6 +77,7 @@ function chainUpdate() {
     eq: () => self,
     is: () => self,
     lt: () => self,
+    in: () => self,
     ...terminal,
   };
   return self;
