@@ -19,7 +19,15 @@ type SourceStats = {
   filteredCountAllTime: number;
   /** `filteredCountAllTime` ÷ max(1 day, fractional days since `sources.created_at`). */
   avgFilteredPerDay: number;
+  /** Fractional days since `sources.created_at`, floored at `MIN_SOURCE_AGE_DAYS`. */
+  daysInFeed: number;
 };
+
+function daysInFeedSinceCreated(sourceCreatedAtIso: string | undefined, nowMs: number): number {
+  return sourceCreatedAtIso
+    ? Math.max((nowMs - new Date(sourceCreatedAtIso).getTime()) / MS_PER_DAY, MIN_SOURCE_AGE_DAYS)
+    : MIN_SOURCE_AGE_DAYS;
+}
 
 function avgFilteredPerDaySinceCreated(
   filteredCountAllTime: number,
@@ -27,10 +35,7 @@ function avgFilteredPerDaySinceCreated(
   nowMs: number
 ): number {
   if (filteredCountAllTime <= 0) return 0;
-  const ageDays = sourceCreatedAtIso
-    ? Math.max((nowMs - new Date(sourceCreatedAtIso).getTime()) / MS_PER_DAY, MIN_SOURCE_AGE_DAYS)
-    : MIN_SOURCE_AGE_DAYS;
-  return filteredCountAllTime / ageDays;
+  return filteredCountAllTime / daysInFeedSinceCreated(sourceCreatedAtIso, nowMs);
 }
 
 async function fetchSourceIdsWithRecentPublished(
@@ -125,6 +130,7 @@ export default async function SourcesPage() {
       top10Appearances: 0,
       filteredCountAllTime: n,
       avgFilteredPerDay: avgFilteredPerDaySinceCreated(n, s.created_at, nowMs),
+      daysInFeed: daysInFeedSinceCreated(s.created_at, nowMs),
     };
   }
 
@@ -156,6 +162,7 @@ export default async function SourcesPage() {
               createdAtBySourceId.get(sourceId),
               nowMs
             ),
+            daysInFeed: daysInFeedSinceCreated(createdAtBySourceId.get(sourceId), nowMs),
           };
         }
         if (row.direction === "up") sourceStats[sourceId].upvotes += 1;
@@ -188,6 +195,7 @@ export default async function SourcesPage() {
             createdAtBySourceId.get(sourceId),
             nowMs
           ),
+          daysInFeed: daysInFeedSinceCreated(createdAtBySourceId.get(sourceId), nowMs),
         };
       }
       sourceStats[sourceId].top10Appearances += 1;

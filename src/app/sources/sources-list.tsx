@@ -45,6 +45,7 @@ type SourceStats = {
   top10Appearances: number;
   filteredCountAllTime: number;
   avgFilteredPerDay: number;
+  daysInFeed: number;
 };
 
 export function SourcesList({
@@ -105,18 +106,20 @@ export function SourcesList({
         top10Appearances: 0,
         filteredCountAllTime: 0,
         avgFilteredPerDay: 0,
+        daysInFeed: 1,
       }
     );
   }
 
   /**
-   * (up − down + top10) ÷ avg filters/day since the source was added.
-   * Uses server-computed avg so older and newer feeds are comparable.
+   * Mostly net votes, with top-10 frequency as a tiebreaker:
+   * net + (net ÷ 2) × top10/day + 2 × top10/day, where net = up − down and
+   * top10/day = top-10 appearances ÷ days since the source was added.
    */
   function sourceEngagementScore(stats: SourceStats): number {
-    const denom = stats.avgFilteredPerDay;
-    if (denom <= 0) return Number.NEGATIVE_INFINITY;
-    return (stats.upvotes - stats.downvotes + stats.top10Appearances) / denom;
+    const net = stats.upvotes - stats.downvotes;
+    const top10PerDay = stats.top10Appearances / stats.daysInFeed;
+    return net + (net / 2) * top10PerDay + 2 * top10PerDay;
   }
 
   const sortedSources = [...sources].sort((a, b) => {
@@ -229,8 +232,8 @@ export function SourcesList({
                   {stats.avgFilteredPerDay.toFixed(1)}/day since added)
                 </p>
                 <p className="text-xs text-zinc-500 mt-0.5">
-                  (up − down + top 10) ÷ filtered/day (since added):{" "}
-                  {sortScore === Number.NEGATIVE_INFINITY ? "—" : sortScore.toFixed(2)}
+                  Score (net + net/2 × top 10/day + 2 × top 10/day, net = up − down):{" "}
+                  {sortScore.toFixed(2)}
                 </p>
               </div>
               <button
